@@ -6,102 +6,56 @@
 
 Build a **headless minimal program** that:
 
-1. Uses **Ballistica / BombSquad game physics** (identical math to the real game — not a toy sim).
-2. Spawns a **Spaz** on a map (**The Pad**).
-3. **Trains** an AI to move around **without falling**.
-4. No graphics required — headless binary fires the same 8 ms ODE sim.
-5. Continuously saves progress to a **`.brain` checkpoint file** that can resume training (LLM-checkpoint style).
+1. Uses **Ballistica / BombSquad game physics** (identical math to the real game).
+2. Spawns **two Spazzes** on a **flat Football Stadium** (no powerups, no flags).
+3. Each Spaz observes the **3D node position** of the other.
+4. They **fight and learn** (self-play). More **momentum** → more punch damage
+   (stock Spaz `HitMessage` → node `impulse` using `punch_momentum_*`).
+5. Continuously saves progress to a **`.brain` checkpoint**.
 
-Repo owner: **BroBordd** on GitHub. Project: this repository.
+Repo owner: **BroBordd** on GitHub. Canonical tree: **`ballistica-walktrain/`**.
 
-## Current status (as of this handoff)
+## Current status
 
 | Item | Status |
 |------|--------|
-| Pure-Python MLP brain + gzip JSON checkpoints | **Done** (`walktrain/brain.py`) |
-| Session/Activity: Spaz on The Pad + RL tick loop | **Done** (`walktrain/activity.py`) |
-| `--exec` boot + `run.sh` (standalone + `BALLISTICA_ROOT`) | **Done** |
-| Prefab headless binary | **Done** — `ballistica/build/prefab/full/linux_x86_64_server/debug/dist/ballisticakit_headless` |
-| libpython / PYTHONHOME bootstrap in `run.sh` | **Done** (conda shared `libpython3.14`) |
-| Movement API | **Done** — use `on_move_left_right` / `on_move_up_down` (not `on_move`) |
-| Fall physics actually reachable | **Done** — delete The Pad bumper railing on map load |
-| Near-edge obs / edge penalty | **Done** — ThePad has no `is_point_near_edge`; use pad-radius heuristic |
-| Center spawn curriculum | **Done** — FFA rim spawns were too harsh for REINFORCE |
-| End-to-end episodes + `.brain` save/resume | **Verified** |
-| Policy reliably avoids falls | **In progress** — checkpoint at **~1915 eps**; fall rate still being tuned. |
-| Brain `meta` (map/task/obs scales) | **Done** — written on save; `stamp_meta` for old files |
-| BombSquad 1.8 / API 9 playback plugin | **Done** — standalone `walktrain_brain.WalkTrainBrainPlugin`, `/brainbot` |
+| Pure-Python MLP brain + gzip JSON checkpoints | **Done** (`walktrain/brain.py`, **v2**) |
+| Flat Football Stadium duel activity (2 Spazzes) | **Done** (`walktrain/activity.py`) |
+| Brain `meta` flat rules (`flat_map`, `no_powerups`, `no_flags`) | **Done** |
+| BombSquad plugin reads flat rules + spawns duel | **Done** (`walktrain_brain.py`) |
+| Old The Pad walk brain (`spaz_walk.brain`) | **Deleted** — use `spaz_fight.brain` |
 
-**Initial prompt scope:** infrastructure is complete. Remaining work is **training quality** (and optional polish in `NEXT_STEPS.md`), not missing plumbing.
-
-**Parallel fast training:** `./walktrain/run_parallel.sh` launches N headless processes (`WALKTRAIN_WORKERS`, default nproc) sharing one flocked `.brain` (Hogwild pull/push). Default speed exponent **8** (256× wall clock). Not GPU/Isaac — Ballistica ODE is CPU; parallelism = more processes + `BA_UDP_PORT=0`.
-
-**Next agent priority:** keep parallel training on `output/spaz_walk.brain`; if fall rate stays flat past ~500–1000 eps, try lower LR, longer inland episodes, or stronger center-seeking reward; optional eval mode / jump. Stale duplicate tree at `ballistica/walktrain/` differs from canonical `ballistica-walktrain/` — sync or delete when convenient.
+**Next agent priority:** run/train `output/spaz_fight.brain` (single or
+`run_parallel.sh`); tune damage/close/kill rewards if agents stall; keep
+plugin flat powerup patch working on API 9.
 
 ## How to run
 
 ```bash
 cd /path/to/ballistica-walktrain
-export BALLISTICA_ROOT=../ballistica   # sibling engine checkout
+export BALLISTICA_ROOT=../ballistica
 ./walktrain/run.sh
 ```
 
-Useful env:
-
 | Env | Default | Meaning |
 |-----|---------|---------|
-| `WALKTRAIN_BRAIN` | `output/spaz_walk.brain` | Checkpoint path (resume = same path) |
-| `WALKTRAIN_SPEED` | `3` | Wall-clock `2**n` via debug speed exponent |
-| `WALKTRAIN_SAVE_EVERY` | `5` | Episodes between saves |
-| `WALKTRAIN_MAX_EP` | `30` | Episode timeout (sim seconds) |
-| `LIBPYTHON_DIR` | auto | Dir containing `libpython3.14.so.1.0` |
-| `PYTHONHOME` | auto with conda | Must match the shared libpython prefix |
+| `WALKTRAIN_BRAIN` | `output/spaz_fight.brain` | Checkpoint path |
+| `WALKTRAIN_SPEED` | `3` | Wall-clock `2**n` |
+| `WALKTRAIN_SAVE_EVERY` | `5` | Duels between saves |
+| `WALKTRAIN_MAX_EP` | `40` | Duel timeout (sim seconds) |
 
-Codespaces note: MS CPython is often static-only. Prefab headless needs shared `libpython3.14.so.1.0` — `run.sh` picks conda’s (`/opt/conda/lib`) and sets matching `PYTHONHOME`.
+## Momentum → damage (game API)
 
-## Sample log (working)
+Punches send `bs.HitMessage` with magnitudes from
+`node.punch_momentum_angular` / `punch_momentum_linear` and `punch_power`.
+Targets apply node message `'impulse'`; resulting `node.damage` becomes HP
+loss (`damage_scale * node.damage`). Running into punches deals more damage.
+Flat damage (`flat_damage`) bypasses that — we don't use it for punches.
 
-```text
-WalkTrain boot → {..., 'speed_exponent': 5, 'max_episode_seconds': 25.0}
-WalkTrain: launching WalkTrainSession
-WalkTrain: brain=.../output/spaz_walk.brain episodes=0 steps=0 speed=2^5
-ep=1 ret=… survive=25.0s fell=False dist=… drift=… best=25.0s …
-ep=2 ret=… survive=4.5s fell=True dist=… drift=… best=25.0s …
-Saved brain → .../output/spaz_walk.brain (episodes=…)
-```
+## Critical pitfalls
 
-## Critical pitfalls (already solved — do not rediscover)
-
-1. **`Spaz.on_move(x,y)` is broken** on current engine: sends node message `'move'` → `Invalid node-message type`. Use `on_move_left_right` / `on_move_up_down` like SpazBot.
-2. **The Pad bumper railing** prevents walking off; trainer deletes `map.railing` after construct so falls are learnable.
-3. **`Map.is_point_near_edge` is a no-op** on ThePad (base returns False). Trainer uses `_NEAR_EDGE_RADIUS` around `_PAD_CENTER`.
-4. **FFA spawn points are on the rim** — random policy dies instantly. Trainer spawns near center with expanding jitter.
-5. **stdlib `logging` often invisible** on headless stdout — use `print(..., flush=True)` for episode lines.
-6. **`bs.new_host_session` wants a class**, not an instance — settings via `SESSION_SETTINGS` before launch.
-
-## Layout
-
-```
-ballistica-walktrain/
-  README.md
-  docs/HANDOFF.md
-  docs/ARCHITECTURE.md
-  docs/NEXT_STEPS.md
-  walktrain/
-    brain.py activity.py boot.py run.sh
-  output/                   # *.brain checkpoints (gitignored)
-```
-
-## Engine facts
-
-- Sim step: **8 ms** — same in headless.
-- Fall: `OutOfBoundsMessage` → `DieMessage(FALL)`; also Y-drop backup in trainer.
-- Upstream: `https://github.com/efroemling/ballistica`
-- Prefab: `make prefab-server-debug-build` (needs `uv`, `clang-format`).
-
-## Success criteria
-
-1. Headless process logs `ep=N ret=… survive=… fell=…` indefinitely.
-2. `output/spaz_walk.brain` updates periodically.
-3. Kill + relaunch continues `episodes` from checkpoint.
-4. Over time, fall rate decreases / survival increases on The Pad (railing removed).
+1. Use `on_move_left_right` / `on_move_up_down` (not `on_move`).
+2. Brain **v2** obs/actions differ from walk v1 — old brains will not load.
+3. Plugin suppresses DeathMatch powerups when `meta.flat_map` / `no_powerups`.
+4. `print(..., flush=True)` for headless logs (stdlib logging often silent).
+5. `bs.new_host_session` wants a class; settings via `SESSION_SETTINGS`.

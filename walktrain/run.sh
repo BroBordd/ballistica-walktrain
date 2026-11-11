@@ -26,7 +26,7 @@ BALLISTICA_ROOT="$(cd "$BALLISTICA_ROOT" 2>/dev/null && pwd)" || {
   exit 1
 }
 
-export WALKTRAIN_BRAIN="${WALKTRAIN_BRAIN:-$REPO_ROOT/output/spaz_walk.brain}"
+export WALKTRAIN_BRAIN="${WALKTRAIN_BRAIN:-$REPO_ROOT/output/spaz_fight.brain}"
 export WALKTRAIN_SPEED="${WALKTRAIN_SPEED:-3}"
 export WALKTRAIN_SAVE_EVERY="${WALKTRAIN_SAVE_EVERY:-5}"
 mkdir -p "$(dirname "$WALKTRAIN_BRAIN")"

@@ -20,21 +20,19 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterator, Sequence
 
 
-BRAIN_VERSION = 1
+BRAIN_VERSION = 2
 
-# Observation layout (fixed; bump BRAIN_VERSION if changed):
-# 0-2: pos xyz relative to map center, scaled
-# 3-5: velocity xyz, scaled
-# 6:   height above spawn y, scaled
-# 7:   near_edge (0/1)
-# 8:   dist_from_center, scaled
-# 9:   speed, scaled
-# 10:  sin(episode_time)
-# 11:  cos(episode_time)
+# Observation layout v2 (fight / flat stadium):
+# 0-2: self pos xyz relative to map center, scaled
+# 3-5: self velocity xyz, scaled
+# 6-8: opponent node pos xyz relative to self, scaled
+# 9:   self horizontal speed, scaled
+# 10:  opponent horizontal speed, scaled
+# 11:  self hitpoints fraction (0..1)
 OBS_SIZE = 12
 
-# Actions: 8 compass dirs + idle, each with/without run → 18
-# Index: dir*2 + run   where dir in 0..8 (0=idle, 1=N ... 8=NW)
+# Actions: 8 compass dirs + idle, each with run bit + punch bit → 36
+# Index: dir*4 + run*2 + punch   where dir in 0..8 (0=idle, 1=N ... 8=NW)
 DIRS: list[tuple[float, float]] = [
     (0.0, 0.0),  # idle
     (0.0, 1.0),
@@ -47,30 +45,35 @@ DIRS: list[tuple[float, float]] = [
     (-0.707, 0.707),
 ]
 N_DIRS = len(DIRS)
-N_ACTIONS = N_DIRS * 2  # * run bit
+N_ACTIONS = N_DIRS * 4  # * run bit * punch bit
 
 
 @dataclass
 class BrainMeta:
     """Where/how this brain was trained — used by playback plugins.
 
-    Old checkpoints without a ``meta`` block default to The Pad walk-train
-    values so existing ``.brain`` files keep working.
+    Flat-map rules (``flat_map``, ``no_powerups``, ``no_flags``) tell the
+    in-game plugin to force a bare Football Stadium duel with no extras.
     """
 
-    map_name: str = 'The Pad'
-    map_type: str = 'ThePad'
-    task: str = 'walk_no_fall'
+    map_name: str = 'Football Stadium'
+    map_type: str = 'FootballStadium'
+    task: str = 'duel_fight'
     trainer: str = 'walktrain'
-    pad_center: tuple[float, float, float] = (0.46, 4.38, -3.0)
-    near_edge_radius: float = 5.8
-    pos_scale: float = 0.12
+    pad_center: tuple[float, float, float] = (-0.1, 0.04, 0.11)
+    near_edge_radius: float = 10.0
+    pos_scale: float = 0.08
     vel_scale: float = 0.08
-    fall_y_drop: float = 3.5
-    railing_removed_in_training: bool = True
+    fall_y_drop: float = 5.0
+    railing_removed_in_training: bool = False
+    flat_map: bool = True
+    no_powerups: bool = True
+    no_flags: bool = True
     notes: str = (
-        'Trained headless on The Pad with bumper railing removed. '
-        'Obs/actions are walktrain v1.'
+        'Self-play duel on flat Football Stadium (no powerups/flags). '
+        'Obs include opponent node xyz. Punch damage scales with momentum '
+        'via Spaz HitMessage → node impulse (punch_momentum_angular / '
+        'punch_momentum_linear). Obs/actions are walktrain v2.'
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,23 +85,14 @@ class BrainMeta:
     def from_dict(cls, data: dict[str, Any] | None) -> BrainMeta:
         if not data:
             return cls()
-        center = data.get('pad_center', (0.46, 4.38, -3.0))
+        center = data.get('pad_center', (-0.1, 0.04, 0.11))
         if not isinstance(center, (list, tuple)) or len(center) != 3:
-            center = (0.46, 4.38, -3.0)
+            center = (-0.1, 0.04, 0.11)
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        raw = {k: v for k, v in data.items() if k in known and k != 'pad_center'}
         return cls(
-            map_name=str(data.get('map_name', 'The Pad')),
-            map_type=str(data.get('map_type', 'ThePad')),
-            task=str(data.get('task', 'walk_no_fall')),
-            trainer=str(data.get('trainer', 'walktrain')),
             pad_center=(float(center[0]), float(center[1]), float(center[2])),
-            near_edge_radius=float(data.get('near_edge_radius', 5.8)),
-            pos_scale=float(data.get('pos_scale', 0.12)),
-            vel_scale=float(data.get('vel_scale', 0.08)),
-            fall_y_drop=float(data.get('fall_y_drop', 3.5)),
-            railing_removed_in_training=bool(
-                data.get('railing_removed_in_training', True)
-            ),
-            notes=str(data.get('notes', cls.notes)),
+            **raw,
         )
 
     def matches_map(self, map_name: str) -> bool:
@@ -115,14 +109,17 @@ class HyperParams:
     hidden: int = 64
     learning_rate: float = 0.001
     gamma: float = 0.99
-    entropy_bonus: float = 0.02
-    fall_penalty: float = 40.0
-    survive_reward: float = 0.12
-    move_reward: float = 0.04
-    edge_penalty: float = 0.25
-    max_episode_seconds: float = 30.0
+    entropy_bonus: float = 0.03
+    damage_reward: float = 0.01  # per HP dealt (momentum punches hit harder)
+    kill_reward: float = 25.0
+    death_penalty: float = 25.0
+    hit_penalty: float = 0.005  # per HP taken
+    alive_reward: float = 0.02
+    close_reward: float = 0.04  # reward for staying in punch range
+    max_episode_seconds: float = 40.0
     tick_interval: float = 0.05
     speed_exponent: int = 3  # 2**n realtime (sim still identical)
+    close_range: float = 2.2  # world units; punch engagement distance
 
 
 def _zeros(rows: int, cols: int) -> list[list[float]]:
@@ -161,6 +158,13 @@ def _softmax(logits: list[float]) -> list[float]:
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
+
+
+def _hyper_from_dict(data: dict[str, Any] | None) -> HyperParams:
+    if not data:
+        return HyperParams()
+    known = {f.name for f in HyperParams.__dataclass_fields__.values()}
+    return HyperParams(**{k: v for k, v in data.items() if k in known})
 
 
 class Brain:
@@ -239,12 +243,14 @@ class Brain:
         return action, math.log(p), value
 
     @staticmethod
-    def decode_action(action: int) -> tuple[float, float, float]:
-        """Map action index → (move_x, move_y, run)."""
-        d = action // 2
-        run = float(action % 2)
+    def decode_action(action: int) -> tuple[float, float, float, bool]:
+        """Map action index → (move_x, move_y, run, punch)."""
+        d = action // 4
+        rem = action % 4
+        run = float(rem // 2)
+        punch = bool(rem % 2)
         mx, my = DIRS[d]
-        return mx, my, run
+        return mx, my, run, punch
 
     # --- learning (REINFORCE + baseline) ----------------------------------
 
@@ -299,9 +305,6 @@ class Brain:
             dlogits[action] += 1.0 * adv + ent_c * (
                 -math.log(max(probs[action], 1e-8))
             )
-            # Actually entropy grad for softmax is more subtle; use
-            # simple: encourage flatness via -ent_c * (log p + 1) on chosen
-            # Keep a light entropy push: add -ent_c * log(p_i) into all.
             for i, p in enumerate(probs):
                 dlogits[i] += -ent_c * (math.log(max(p, 1e-8)) + 1.0) * p
 
@@ -434,7 +437,7 @@ class Brain:
         if data.get('obs_size') != OBS_SIZE or data.get('n_actions') != N_ACTIONS:
             raise ValueError('brain obs/action size mismatch')
         brain = cls(
-            hyper=HyperParams(**data['hyper']),
+            hyper=_hyper_from_dict(data.get('hyper')),
             meta=BrainMeta.from_dict(data.get('meta')),
             seed=data['seed'],
         )

@@ -1,5 +1,5 @@
 # Released under the MIT License. See LICENSE for details.
-"""Headless Spaz walk-training session using real Ballistica physics."""
+"""Headless Spaz duel trainer on flat Football Stadium (real physics)."""
 
 from __future__ import annotations
 
@@ -17,20 +17,17 @@ from walktrain.brain import OBS_SIZE, Brain, BrainMeta, HyperParams
 if TYPE_CHECKING:
     from bascenev1lib.actor.spaz import Spaz
 
-# Map center-ish for The Pad (from mapdata flag_default / bounds).
-_PAD_CENTER = (0.46, 4.38, -3.0)
-# Horizontal radius past which we treat the Spaz as near the rim.
-# Spawns sit ~7.3 from center; railings sit around that ring.
-_NEAR_EDGE_RADIUS = 5.8
-# If Y drops this far below spawn, treat as a fall even before OOB.
-_FALL_Y_DROP = 3.5
-_POS_SCALE = 0.12
+# Football Stadium flag_default / midfield — flat ground, no railings.
+_STADIUM_CENTER = (-0.1, 0.04, 0.11)
+_POS_SCALE = 0.08
 _VEL_SCALE = 0.08
+_FALL_Y_DROP = 5.0
+_DEFAULT_HITPOINTS = 1000
 
 _DEFAULT_BRAIN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'output',
-    'spaz_walk.brain',
+    'spaz_fight.brain',
 )
 
 # new_host_session() requires a Session *type*, so boot.py stuffs
@@ -38,42 +35,90 @@ _DEFAULT_BRAIN = os.path.join(
 SESSION_SETTINGS: dict[str, Any] = {}
 
 
-class TraineeSpaz:
-    """Thin wrapper: real Spaz + fall callback for the trainer."""
+def _default_meta() -> BrainMeta:
+    return BrainMeta(
+        map_name='Football Stadium',
+        map_type='FootballStadium',
+        task='duel_fight',
+        trainer='walktrain',
+        pad_center=_STADIUM_CENTER,
+        near_edge_radius=10.0,
+        pos_scale=_POS_SCALE,
+        vel_scale=_VEL_SCALE,
+        fall_y_drop=_FALL_Y_DROP,
+        railing_removed_in_training=False,
+        flat_map=True,
+        no_powerups=True,
+        no_flags=True,
+        notes=(
+            'Self-play duel on flat Football Stadium (no powerups/flags). '
+            'Punch damage scales with momentum via Spaz HitMessage impulse.'
+        ),
+    )
 
-    def __init__(self, spaz: Spaz, on_fell: Any) -> None:
+
+class TraineeSpaz:
+    """Thin wrapper: real Spaz + death callback for the trainer."""
+
+    def __init__(self, spaz: Spaz, on_died: Any) -> None:
         self.spaz = spaz
-        self._on_fell = on_fell
-        self._fell = False
-        # Wrap handlemessage to catch falls without forking Spaz.
+        self._on_died = on_died
+        self._dead = False
         orig = spaz.handlemessage
 
         def _wrapped(msg: Any) -> Any:
-            if isinstance(msg, bs.OutOfBoundsMessage) and not self._fell:
-                self._fell = True
-                self._on_fell()
-            elif isinstance(msg, bs.DieMessage) and not self._fell:
-                how = getattr(msg, 'how', None)
-                if how in (bs.DeathType.FALL, bs.DeathType.OUT_OF_BOUNDS):
-                    self._fell = True
-                    self._on_fell()
+            if self._dead:
+                return orig(msg)
+            if isinstance(msg, bs.OutOfBoundsMessage):
+                self._dead = True
+                self._on_died()
+            elif isinstance(msg, bs.DieMessage):
+                self._dead = True
+                self._on_died()
             return orig(msg)
 
         spaz.handlemessage = _wrapped  # type: ignore[method-assign]
 
     @property
-    def fell(self) -> bool:
-        return self._fell
+    def dead(self) -> bool:
+        return self._dead
 
     def is_alive(self) -> bool:
         try:
-            return bool(self.spaz.is_alive()) and not self._fell
+            if self._dead:
+                return False
+            if not self.spaz.is_alive():
+                return False
+            return int(getattr(self.spaz, 'hitpoints', 0) or 0) > 0
         except Exception:
             return False
 
+    def hitpoints(self) -> int:
+        try:
+            return int(getattr(self.spaz, 'hitpoints', 0) or 0)
+        except Exception:
+            return 0
+
+
+class FighterRoll:
+    """Per-agent episode buffers for one side of a duel."""
+
+    def __init__(self) -> None:
+        self.trainee: TraineeSpaz | None = None
+        self.spawn_pos: tuple[float, float, float] | None = None
+        self.spawn_y = _STADIUM_CENTER[1]
+        self.last_hp = float(_DEFAULT_HITPOINTS)
+        self.damage_dealt = 0.0
+        self.obs: list[list[float]] = []
+        self.actions: list[int] = []
+        self.rewards: list[float] = []
+        self.values: list[float] = []
+        self.log_probs: list[float] = []
+        self.died = False
+
 
 class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
-    """Spawn a Spaz on The Pad; train a brain to walk without falling."""
+    """Spawn two Spazzes on Football Stadium; self-play fight + learn."""
 
     def __init__(self, settings: dict):
         super().__init__(settings)
@@ -83,43 +128,19 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
         self.log_every: int = int(settings.get('log_every', 1))
         self.worker_id: int = int(settings.get('worker_id', 0))
         self.shared_brain: bool = bool(settings.get('shared_brain', True))
+        meta = _default_meta()
         self.brain = Brain.load_or_create(
             self.brain_path,
             hyper=HyperParams(
                 speed_exponent=int(settings.get('speed_exponent', 3)),
                 max_episode_seconds=float(
-                    settings.get('max_episode_seconds', 30.0)
+                    settings.get('max_episode_seconds', 40.0)
                 ),
             ),
-            meta=BrainMeta(
-                map_name='The Pad',
-                map_type='ThePad',
-                task='walk_no_fall',
-                trainer='walktrain',
-                pad_center=_PAD_CENTER,
-                near_edge_radius=_NEAR_EDGE_RADIUS,
-                pos_scale=_POS_SCALE,
-                vel_scale=_VEL_SCALE,
-                fall_y_drop=_FALL_Y_DROP,
-                railing_removed_in_training=True,
-            ),
+            meta=meta,
         )
-        # Keep map/obs metadata in sync with this trainer even for
-        # older checkpoints that predate the meta block.
-        self.brain.meta = BrainMeta(
-            map_name='The Pad',
-            map_type='ThePad',
-            task='walk_no_fall',
-            trainer='walktrain',
-            pad_center=_PAD_CENTER,
-            near_edge_radius=_NEAR_EDGE_RADIUS,
-            pos_scale=_POS_SCALE,
-            vel_scale=_VEL_SCALE,
-            fall_y_drop=_FALL_Y_DROP,
-            railing_removed_in_training=True,
-            notes=self.brain.meta.notes,
-        )
-        # Env/boot settings win over checkpoint hyper for wall-clock knobs.
+        # Always stamp flat-stadium duel rules into the checkpoint.
+        self.brain.meta = _default_meta()
         self._speed_override = (
             int(settings['speed_exponent'])
             if 'speed_exponent' in settings
@@ -131,20 +152,10 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
             else None
         )
         self._apply_runtime_overrides()
-        self._trainee: TraineeSpaz | None = None
+        self._fighters: list[FighterRoll] = [FighterRoll(), FighterRoll()]
         self._timer: bs.Timer | None = None
         self._save_timer: bs.Timer | None = None
         self._episode_t0 = 0.0
-        self._last_pos: tuple[float, float, float] | None = None
-        self._spawn_pos: tuple[float, float, float] | None = None
-        self._dist_moved = 0.0
-        self._obs: list[list[float]] = []
-        self._actions: list[int] = []
-        self._rewards: list[float] = []
-        self._values: list[float] = []
-        self._log_probs: list[float] = []
-        self._episode_fell = False
-        self._spawn_y = _PAD_CENTER[1]
         self._episodes_since_save = 0
         self._started_wall = time.time()
         self._local_episodes = 0
@@ -152,24 +163,15 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
     @override
     def on_transition_in(self) -> None:
         super().on_transition_in()
-        from bascenev1lib.maps import ThePad
+        from bascenev1lib.maps import FootballStadium
 
-        ThePad.preload()
-        self.map = ThePad()
-        # Stock The Pad has bumper railings that bounce a walking Spaz
-        # back onto the floor — without removing them, "don't fall" is
-        # nearly free and the policy never sees OutOfBoundsMessage.
-        railing = getattr(self.map, 'railing', None)
-        if railing is not None:
-            try:
-                railing.delete()
-            except Exception:
-                pass
-            self.map.railing = None  # type: ignore[attr-defined]
-        # Quiet camera / lighting defaults; headless ignores draw.
+        FootballStadium.preload()
+        self.map = FootballStadium()
+        # Flat stadium: no powerups, no flags, no TNT — just the floor.
+        # (We never call setup_standard_powerup_drops; map props stay unused.)
         g = self.globalsnode
-        g.tint = (1.1, 1.05, 1.0)
-        g.ambient_color = (1.0, 1.0, 1.0)
+        g.tint = (1.3, 1.2, 1.0)
+        g.ambient_color = (1.3, 1.2, 1.0)
 
     @override
     def on_begin(self) -> None:
@@ -180,63 +182,20 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
         except Exception as exc:
             logging.warning('Could not set debug speed: %s', exc)
 
-        # print() reaches headless stdout; stdlib logging often does not.
         print(
-            f'WalkTrain w{self.worker_id}: brain={self.brain_path}'
+            f'WalkTrain duel w{self.worker_id}: brain={self.brain_path}'
+            f' map={self.brain.meta.map_name}'
+            f' flat={self.brain.meta.flat_map}'
+            f' no_powerups={self.brain.meta.no_powerups}'
             f' episodes={self.brain.episodes} steps={self.brain.steps}'
             f' speed=2^{hyp.speed_exponent} shared={self.shared_brain}',
             flush=True,
         )
         self._start_episode()
         self._timer = bs.Timer(hyp.tick_interval, self._tick, repeat=True)
-        # Wall-clock periodic save so a kill -9 still keeps recent progress.
         self._save_timer = bs.BaseTimer(
             30.0, bs.WeakCallStrict(self._periodic_save), repeat=True
         )
-
-    def _spawn_point(self) -> tuple[float, float, float]:
-        assert self.map is not None
-        # Mix safe interior starts with rim-adjacent starts so the
-        # policy both explores and must learn not to walk off.
-        rng = self.brain.rng
-        pts = self.map.ffa_spawn_points
-        y = float(pts[0][1]) if pts else _PAD_CENTER[1]
-
-        # Every 3rd episode: real FFA rim spawn (hard).
-        if self.brain.episodes % 3 == 2 and pts:
-            p = pts[self.brain.episodes % len(pts)]
-            return (float(p[0]), float(p[1]), float(p[2]))
-
-        # Otherwise: annulus whose outer radius grows with training.
-        # Early: mostly inland. Later: spawn already near the lip.
-        outer = min(2.5 + 0.06 * self.brain.episodes, 6.8)
-        inner = max(0.0, outer - 2.5)
-        ang = rng.random() * 6.283185307179586
-        # Uniform in annulus area.
-        rad = math.sqrt(
-            rng.random() * (outer * outer - inner * inner) + inner * inner
-        )
-        x = _PAD_CENTER[0] + rad * math.cos(ang)
-        z = _PAD_CENTER[2] + rad * math.sin(ang)
-        return (x, y, z)
-
-    def _make_spaz(self, pos: Sequence[float]) -> TraineeSpaz:
-        from bascenev1lib.actor.spaz import Spaz
-
-        spaz = Spaz(
-            color=(0.2, 0.8, 1.0),
-            highlight=(1.0, 1.0, 1.0),
-            character='Spaz',
-            start_invincible=False,
-            can_accept_powerups=False,
-        )
-        spaz.autoretain()
-        spaz.handlemessage(bs.StandMessage(position=pos, angle=0.0))
-
-        def _on_fell() -> None:
-            self._episode_fell = True
-
-        return TraineeSpaz(spaz, _on_fell)
 
     def _apply_runtime_overrides(self) -> None:
         if self._speed_override is not None:
@@ -244,9 +203,53 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
         if self._max_ep_override is not None:
             self.brain.hyper.max_episode_seconds = self._max_ep_override
 
+    def _side_spawn(self, side: int) -> tuple[float, float, float]:
+        assert self.map is not None
+        # Opposite halves of the field (still "one side" each), but pulled
+        # inward from stock team spawns so early policies can meet & punch.
+        # Stock spawn1/spawn2 sit ~±10 from mid; 0.55 keeps clear sides.
+        try:
+            p = self.map.get_start_position(side)
+            cx, cy, cz = _STADIUM_CENTER
+            x = cx + 0.55 * (float(p[0]) - cx)
+            z = cz + 0.55 * (float(p[2]) - cz)
+            return (x, float(p[1]), z)
+        except Exception:
+            y = _STADIUM_CENTER[1]
+            x = -5.5 if side == 0 else 5.5
+            return (x, y, 0.0)
+
+    def _make_spaz(
+        self,
+        pos: Sequence[float],
+        *,
+        color: tuple[float, float, float],
+        on_died: Any,
+    ) -> TraineeSpaz:
+        from bascenev1lib.actor.spaz import Spaz
+
+        spaz = Spaz(
+            color=color,
+            highlight=(1.0, 1.0, 1.0),
+            character='Spaz',
+            start_invincible=False,
+            can_accept_powerups=False,
+        )
+        spaz.bomb_count = 0
+        spaz.autoretain()
+        angle = 0.0 if pos[0] < 0 else 180.0
+        spaz.handlemessage(bs.StandMessage(position=pos, angle=angle))
+        return TraineeSpaz(spaz, on_died)
+
+    def _drop_fighter(self, roll: FighterRoll) -> None:
+        if roll.trainee is not None:
+            try:
+                roll.trainee.spaz.handlemessage(bs.DieMessage(immediate=True))
+            except Exception:
+                pass
+            roll.trainee = None
+
     def _start_episode(self) -> None:
-        # Flush local updates before adopting peer weights, otherwise a
-        # pull would discard uncommitted REINFORCE steps.
         if self.shared_brain and self.brain._pending_episodes > 0:
             self._save_brain()
             self._episodes_since_save = 0
@@ -254,173 +257,232 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
             try:
                 if self.brain.pull_shared(self.brain_path):
                     self._apply_runtime_overrides()
+                    self.brain.meta = _default_meta()
             except Exception:
                 logging.exception('shared brain pull failed')
 
-        # Drop previous actor.
-        if self._trainee is not None:
-            try:
-                self._trainee.spaz.handlemessage(
-                    bs.DieMessage(immediate=True)
-                )
-            except Exception:
-                pass
-            self._trainee = None
+        colors = ((0.2, 0.7, 1.0), (1.0, 0.35, 0.2))
+        for side, roll in enumerate(self._fighters):
+            self._drop_fighter(roll)
+            pos = self._side_spawn(side)
+            roll.spawn_pos = pos
+            roll.spawn_y = pos[1]
+            roll.last_hp = float(_DEFAULT_HITPOINTS)
+            roll.damage_dealt = 0.0
+            roll.obs = []
+            roll.actions = []
+            roll.rewards = []
+            roll.values = []
+            roll.log_probs = []
+            roll.died = False
 
-        pos = self._spawn_point()
-        self._spawn_y = pos[1]
-        self._spawn_pos = (pos[0], pos[1], pos[2])
-        self._trainee = self._make_spaz(pos)
+            def _on_died(r: FighterRoll = roll) -> None:
+                r.died = True
+
+            roll.trainee = self._make_spaz(
+                pos, color=colors[side], on_died=_on_died
+            )
+            roll.last_hp = float(roll.trainee.hitpoints() or _DEFAULT_HITPOINTS)
+
         self._episode_t0 = bs.time()
-        self._last_pos = self._spawn_pos
-        self._dist_moved = 0.0
-        self._obs = []
-        self._actions = []
-        self._rewards = []
-        self._values = []
-        self._log_probs = []
-        self._episode_fell = False
 
-    def _observe(self) -> list[float] | None:
-        assert self._trainee is not None and self.map is not None
-        node = self._trainee.spaz.node
+    def _observe(
+        self, me: FighterRoll, foe: FighterRoll
+    ) -> list[float] | None:
+        assert me.trainee is not None
+        node = me.trainee.spaz.node
         if not node:
             return None
+        foe_node = None
+        if foe.trainee is not None:
+            foe_node = foe.trainee.spaz.node
+        if not foe_node:
+            return None
+
+        meta = self.brain.meta
+        cx, cy, cz = meta.pad_center
         pos = node.position
         vel = node.velocity
-        cx, cy, cz = _PAD_CENTER
-        dx = (pos[0] - cx) * _POS_SCALE
-        dy = (pos[1] - cy) * _POS_SCALE
-        dz = (pos[2] - cz) * _POS_SCALE
-        vx, vy, vz = (
-            vel[0] * _VEL_SCALE,
-            vel[1] * _VEL_SCALE,
-            vel[2] * _VEL_SCALE,
-        )
-        height = (pos[1] - self._spawn_y) * _POS_SCALE
-        # ThePad does not override Map.is_point_near_edge (always False).
-        # Use a pad-radius heuristic so edge_penalty / obs are meaningful.
-        dist = math.sqrt(dx * dx + dz * dz)
-        near = 1.0 if (dist / _POS_SCALE) > _NEAR_EDGE_RADIUS else 0.0
+        fpos = foe_node.position
+        fvel = foe_node.velocity
+
+        dx = (pos[0] - cx) * meta.pos_scale
+        dy = (pos[1] - cy) * meta.pos_scale
+        dz = (pos[2] - cz) * meta.pos_scale
+        vx = vel[0] * meta.vel_scale
+        vy = vel[1] * meta.vel_scale
+        vz = vel[2] * meta.vel_scale
+        ox = (fpos[0] - pos[0]) * meta.pos_scale
+        oy = (fpos[1] - pos[1]) * meta.pos_scale
+        oz = (fpos[2] - pos[2]) * meta.pos_scale
         speed = math.sqrt(vx * vx + vz * vz)
-        et = bs.time() - self._episode_t0
-        obs = [
-            dx,
-            dy,
-            dz,
-            vx,
-            vy,
-            vz,
-            height,
-            near,
-            dist,
-            speed,
-            math.sin(et),
-            math.cos(et),
-        ]
+        foe_speed = math.sqrt(
+            (fvel[0] * meta.vel_scale) ** 2 + (fvel[2] * meta.vel_scale) ** 2
+        )
+        hp_frac = max(0.0, min(1.0, me.trainee.hitpoints() / float(_DEFAULT_HITPOINTS)))
+        obs = [dx, dy, dz, vx, vy, vz, ox, oy, oz, speed, foe_speed, hp_frac]
         assert len(obs) == OBS_SIZE
         return obs
 
-    def _apply_action(self, action: int) -> None:
-        assert self._trainee is not None
-        mx, my, run = Brain.decode_action(action)
-        spaz = self._trainee.spaz
-        # Prefer attribute setters: Spaz.on_move() sends node message
-        # 'move', which current SpazNode C++ does not handle (Invalid
-        # node-message type). Stock SpazBot still uses these APIs.
+    def _apply_action(self, roll: FighterRoll, action: int) -> None:
+        assert roll.trainee is not None
+        mx, my, run, punch = Brain.decode_action(action)
+        spaz = roll.trainee.spaz
         spaz.on_move_left_right(mx)
         spaz.on_move_up_down(my)
         spaz.on_run(run)
+        if punch:
+            spaz.on_punch_press()
+            spaz.on_punch_release()
 
     def _tick(self) -> None:
-        if self._trainee is None:
+        if any(f.trainee is None for f in self._fighters):
             self._start_episode()
             return
 
         hyp = self.brain.hyper
         elapsed = bs.time() - self._episode_t0
-        alive = self._trainee.is_alive() and not self._episode_fell
-
-        # Episode timeout → soft end (survived).
         timed_out = elapsed >= hyp.max_episode_seconds
-        if not alive or timed_out:
-            self._end_episode(fell=not alive and not timed_out)
+
+        a, b = self._fighters
+        alive_a = a.trainee is not None and a.trainee.is_alive() and not a.died
+        alive_b = b.trainee is not None and b.trainee.is_alive() and not b.died
+
+        # Backup fall / below-floor death on the flat pitch.
+        for roll in self._fighters:
+            if roll.trainee is None:
+                continue
+            node = roll.trainee.spaz.node
+            if node and node.position[1] < roll.spawn_y - _FALL_Y_DROP:
+                roll.died = True
+
+        alive_a = a.trainee is not None and a.trainee.is_alive() and not a.died
+        alive_b = b.trainee is not None and b.trainee.is_alive() and not b.died
+
+        if timed_out or not alive_a or not alive_b:
+            self._end_episode(alive_a=alive_a, alive_b=alive_b, timed_out=timed_out)
             return
 
-        obs = self._observe()
-        if obs is None:
-            self._end_episode(fell=True)
+        # Snapshot HP before actions so damage this tick is attributable.
+        hp_before = [float(f.trainee.hitpoints()) for f in self._fighters]
+
+        for i, roll in enumerate(self._fighters):
+            foe = self._fighters[1 - i]
+            obs = self._observe(roll, foe)
+            if obs is None:
+                roll.died = True
+                continue
+            action, logp, value = self.brain.act(obs)
+            self._apply_action(roll, action)
+            roll.obs.append(obs)
+            roll.actions.append(action)
+            roll.values.append(value)
+            roll.log_probs.append(logp)
+            # Placeholder; filled after both act and HP deltas resolve.
+            roll.rewards.append(0.0)
+
+        if any(f.died or (f.trainee is not None and not f.trainee.is_alive()) for f in self._fighters):
+            # Finalize rewards then end.
+            self._fill_tick_rewards(hp_before)
+            alive_a = a.trainee is not None and a.trainee.is_alive() and not a.died
+            alive_b = b.trainee is not None and b.trainee.is_alive() and not b.died
+            self._end_episode(alive_a=alive_a, alive_b=alive_b, timed_out=False)
             return
 
-        action, logp, value = self.brain.act(obs)
-        self._apply_action(action)
+        self._fill_tick_rewards(hp_before)
 
-        node = self._trainee.spaz.node
-        pos = node.position if node else self._last_pos
-        assert pos is not None
-        # Backup fall detection: long drop before map-bounds OOB fires.
-        if pos[1] < self._spawn_y - _FALL_Y_DROP:
-            self._episode_fell = True
-        moved = 0.0
-        if self._last_pos is not None:
-            moved = math.sqrt(
-                (pos[0] - self._last_pos[0]) ** 2
-                + (pos[2] - self._last_pos[2]) ** 2
-            )
-        self._dist_moved += moved
-        self._last_pos = (pos[0], pos[1], pos[2])
-
-        near = obs[7]
-        reward = hyp.survive_reward + hyp.move_reward * moved
-        if near > 0.5:
-            # Penalize loitering at the rim (falling risk).
-            reward -= hyp.edge_penalty
-
-        self._obs.append(obs)
-        self._actions.append(action)
-        self._rewards.append(reward)
-        self._values.append(value)
-        self._log_probs.append(logp)
-
-        # Fall may arrive between ticks via OutOfBoundsMessage.
-        if self._episode_fell or not self._trainee.is_alive():
-            self._end_episode(fell=True)
-
-    def _end_episode(self, *, fell: bool) -> None:
+    def _fill_tick_rewards(self, hp_before: list[float]) -> None:
         hyp = self.brain.hyper
-        survival = bs.time() - self._episode_t0
-        if self._rewards:
-            if fell:
-                self._rewards[-1] -= hyp.fall_penalty
+        hp_now = []
+        for roll in self._fighters:
+            if roll.trainee is None:
+                hp_now.append(0.0)
             else:
-                # Bonus for lasting the full window without falling.
-                self._rewards[-1] += hyp.fall_penalty * 0.5
+                hp_now.append(float(roll.trainee.hitpoints()))
 
-        ep_return = self.brain.learn_episode(
-            self._obs,
-            self._actions,
-            self._rewards,
-            self._values,
-            self._log_probs,
-        )
-        if survival > self.brain.best_survival:
-            self.brain.best_survival = survival
+        for i, roll in enumerate(self._fighters):
+            if not roll.rewards:
+                continue
+            foe_i = 1 - i
+            lost = max(0.0, hp_before[i] - hp_now[i])
+            dealt = max(0.0, hp_before[foe_i] - hp_now[foe_i])
+            roll.damage_dealt += dealt
+            roll.last_hp = hp_now[i]
+
+            reward = hyp.alive_reward + hyp.damage_reward * dealt
+            reward -= hyp.hit_penalty * lost
+
+            # Encourage closing to punch range (momentum punches need contact).
+            if roll.obs:
+                ox, oy, oz = roll.obs[-1][6], roll.obs[-1][7], roll.obs[-1][8]
+                dist = math.sqrt(ox * ox + oy * oy + oz * oz) / max(
+                    self.brain.meta.pos_scale, 1e-6
+                )
+                if dist <= hyp.close_range:
+                    reward += hyp.close_reward
+                else:
+                    # Mild pull toward the opponent.
+                    reward += hyp.close_reward * 0.15 * max(0.0, 1.0 - dist / 20.0)
+
+            roll.rewards[-1] = reward
+
+    def _end_episode(
+        self, *, alive_a: bool, alive_b: bool, timed_out: bool
+    ) -> None:
+        hyp = self.brain.hyper
+        duration = bs.time() - self._episode_t0
+
+        # Terminal bonuses: winner / loser (draws on timeout get nothing extra).
+        if not timed_out:
+            if alive_a and not alive_b:
+                if self._fighters[0].rewards:
+                    self._fighters[0].rewards[-1] += hyp.kill_reward
+                if self._fighters[1].rewards:
+                    self._fighters[1].rewards[-1] -= hyp.death_penalty
+            elif alive_b and not alive_a:
+                if self._fighters[1].rewards:
+                    self._fighters[1].rewards[-1] += hyp.kill_reward
+                if self._fighters[0].rewards:
+                    self._fighters[0].rewards[-1] -= hyp.death_penalty
+
+        returns = []
+        for roll in self._fighters:
+            ep_return = self.brain.learn_episode(
+                roll.obs,
+                roll.actions,
+                roll.rewards,
+                roll.values,
+                roll.log_probs,
+            )
+            returns.append(ep_return)
+
+        best = max(returns) if returns else 0.0
+        if best > self.brain.best_survival:
+            self.brain.best_survival = best
 
         self._episodes_since_save += 1
         self._local_episodes += 1
-        if self.brain.episodes % self.log_every == 0:
+        # learn_episode increments episodes per fighter; treat a duel as one
+        # logical episode in logs (brain.episodes counts fighter-updates).
+        if self._local_episodes % self.log_every == 0:
             wall = time.time() - self._started_wall
-            end = self._last_pos or self._spawn_pos or (0.0, 0.0, 0.0)
-            spawn = self._spawn_pos or end
-            drift = math.sqrt(
-                (end[0] - spawn[0]) ** 2 + (end[2] - spawn[2]) ** 2
+            result = (
+                'timeout'
+                if timed_out
+                else (
+                    'A'
+                    if alive_a and not alive_b
+                    else 'B' if alive_b and not alive_a else 'draw'
+                )
             )
             print(
-                f'w{self.worker_id} ep={self.brain.episodes}'
-                f' local={self._local_episodes} ret={ep_return:.2f}'
-                f' survive={survival:.1f}s fell={fell}'
-                f' dist={self._dist_moved:.1f} drift={drift:.1f}'
-                f' best={self.brain.best_survival:.1f}s'
+                f'w{self.worker_id} duel={self._local_episodes}'
+                f' brain_eps={self.brain.episodes}'
+                f' retA={returns[0]:.2f} retB={returns[1]:.2f}'
+                f' dmgA={self._fighters[0].damage_dealt:.0f}'
+                f' dmgB={self._fighters[1].damage_dealt:.0f}'
+                f' t={duration:.1f}s winner={result}'
+                f' best={self.brain.best_survival:.1f}'
                 f' steps={self.brain.steps} wall={wall:.0f}s',
                 flush=True,
             )
@@ -433,13 +495,16 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
 
     def _save_brain(self) -> None:
         try:
+            self.brain.meta = _default_meta()
             if self.shared_brain:
                 self.brain.save_shared(self.brain_path)
             else:
                 self.brain.save(self.brain_path)
             print(
                 f'w{self.worker_id} Saved brain → {self.brain_path}'
-                f' (episodes={self.brain.episodes})',
+                f' (episodes={self.brain.episodes}'
+                f' map={self.brain.meta.map_name}'
+                f' flat={self.brain.meta.flat_map})',
                 flush=True,
             )
         except Exception:

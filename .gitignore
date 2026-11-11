@@ -8,9 +8,10 @@ output/logs/
 *.brain.*
 *.brain.lock
 
-# Keep placeholder + the default trained brain in the repo
+# Keep placeholder + default fight brain when present
 !output/.gitkeep
-!output/spaz_walk.brain
+!output/spaz_fight.brain
+
 
 # Python
 __pycache__/

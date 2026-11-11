@@ -1,11 +1,12 @@
 # ba_meta require api 9
 # Released under the MIT License. See LICENSE for details.
-"""Standalone BombSquad 1.8 / API 9 plugin: play a walktrain ``.brain``.
+"""Standalone BombSquad 1.8 / API 9 plugin: play a walktrain fight ``.brain``.
 
 Drop this single file into your mods folder (plus a brain under
-``mods/brains/spaz_walk.brain``). Enable under Settings → Plugins, then chat
-``/brainbot`` — the plugin starts a teams Death Match on the brain's map and
-spawns the bot.
+``mods/brains/spaz_fight.brain``). Enable under Settings → Plugins, then chat
+``/brainbot`` — the plugin reads flat-map rules from the brain, starts a
+teams Death Match on Football Stadium (no powerups/flags), and spawns two
+fighting bots that track each other's node positions.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import bascenev1 as bs
 # Brain inference (load + forward only; no training / shared-lock I/O)
 # ---------------------------------------------------------------------------
 
-BRAIN_VERSION = 1
+BRAIN_VERSION = 2
 OBS_SIZE = 12
 
 DIRS: list[tuple[float, float]] = [
@@ -41,50 +42,45 @@ DIRS: list[tuple[float, float]] = [
     (-0.707, 0.707),
 ]
 N_DIRS = len(DIRS)
-N_ACTIONS = N_DIRS * 2
+N_ACTIONS = N_DIRS * 4
 
 _CONFIG_BRAIN_PATH = 'WalkTrain Brain Path'
 _CONFIG_GREEDY = 'WalkTrain Brain Greedy'
+_DEFAULT_HITPOINTS = 1000
 
 
 @dataclass
 class BrainMeta:
-    map_name: str = 'The Pad'
-    map_type: str = 'ThePad'
-    task: str = 'walk_no_fall'
+    map_name: str = 'Football Stadium'
+    map_type: str = 'FootballStadium'
+    task: str = 'duel_fight'
     trainer: str = 'walktrain'
-    pad_center: tuple[float, float, float] = (0.46, 4.38, -3.0)
-    near_edge_radius: float = 5.8
-    pos_scale: float = 0.12
+    pad_center: tuple[float, float, float] = (-0.1, 0.04, 0.11)
+    near_edge_radius: float = 10.0
+    pos_scale: float = 0.08
     vel_scale: float = 0.08
-    fall_y_drop: float = 3.5
-    railing_removed_in_training: bool = True
+    fall_y_drop: float = 5.0
+    railing_removed_in_training: bool = False
+    flat_map: bool = True
+    no_powerups: bool = True
+    no_flags: bool = True
     notes: str = (
-        'Trained headless on The Pad with bumper railing removed. '
-        'Obs/actions are walktrain v1.'
+        'Self-play duel on flat Football Stadium (no powerups/flags). '
+        'Punch damage scales with momentum via Spaz HitMessage impulse.'
     )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> BrainMeta:
         if not data:
             return cls()
-        center = data.get('pad_center', (0.46, 4.38, -3.0))
+        center = data.get('pad_center', (-0.1, 0.04, 0.11))
         if not isinstance(center, (list, tuple)) or len(center) != 3:
-            center = (0.46, 4.38, -3.0)
+            center = (-0.1, 0.04, 0.11)
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        raw = {k: v for k, v in data.items() if k in known and k != 'pad_center'}
         return cls(
-            map_name=str(data.get('map_name', 'The Pad')),
-            map_type=str(data.get('map_type', 'ThePad')),
-            task=str(data.get('task', 'walk_no_fall')),
-            trainer=str(data.get('trainer', 'walktrain')),
             pad_center=(float(center[0]), float(center[1]), float(center[2])),
-            near_edge_radius=float(data.get('near_edge_radius', 5.8)),
-            pos_scale=float(data.get('pos_scale', 0.12)),
-            vel_scale=float(data.get('vel_scale', 0.08)),
-            fall_y_drop=float(data.get('fall_y_drop', 3.5)),
-            railing_removed_in_training=bool(
-                data.get('railing_removed_in_training', True)
-            ),
-            notes=str(data.get('notes', cls.notes)),
+            **raw,
         )
 
     def matches_map(self, map_name: str) -> bool:
@@ -96,14 +92,17 @@ class HyperParams:
     hidden: int = 64
     learning_rate: float = 0.001
     gamma: float = 0.99
-    entropy_bonus: float = 0.02
-    fall_penalty: float = 40.0
-    survive_reward: float = 0.12
-    move_reward: float = 0.04
-    edge_penalty: float = 0.25
-    max_episode_seconds: float = 30.0
+    entropy_bonus: float = 0.03
+    damage_reward: float = 0.01
+    kill_reward: float = 25.0
+    death_penalty: float = 25.0
+    hit_penalty: float = 0.005
+    alive_reward: float = 0.02
+    close_reward: float = 0.04
+    max_episode_seconds: float = 40.0
     tick_interval: float = 0.05
     speed_exponent: int = 3
+    close_range: float = 2.2
 
 
 def _matmul_vec(mat: list[list[float]], vec: list[float]) -> list[float]:
@@ -185,11 +184,13 @@ class Brain:
         return action, math.log(p), value
 
     @staticmethod
-    def decode_action(action: int) -> tuple[float, float, float]:
-        d = action // 2
-        run = float(action % 2)
+    def decode_action(action: int) -> tuple[float, float, float, bool]:
+        d = action // 4
+        rem = action % 4
+        run = float(rem // 2)
+        punch = bool(rem % 2)
         mx, my = DIRS[d]
-        return mx, my, run
+        return mx, my, run, punch
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Brain:
@@ -231,30 +232,31 @@ class Brain:
 
 
 # ---------------------------------------------------------------------------
-# In-game Spaz driven by a loaded brain
+# Two Spazzes that fight; each observes the other's node xyz
 # ---------------------------------------------------------------------------
 
 
-class BrainPlayer:
-    """Spawns a Spaz and ticks a trained brain against the live map."""
+class BrainFighter:
+    """One side of a duel driven by a shared brain."""
 
     def __init__(
         self,
         activity: bs.Activity,
         brain: Brain,
         *,
+        side: int,
         greedy: bool = True,
         character: str = 'Spaz',
         color: tuple[float, float, float] = (0.2, 0.9, 0.4),
     ) -> None:
         self.activity = activity
         self.brain = brain
+        self.side = side
         self.greedy = greedy
         self.character = character
         self.color = color
+        self.opponent: BrainFighter | None = None
         self._spaz: Any | None = None
-        self._timer: bs.Timer | None = None
-        self._episode_t0 = 0.0
         self._spawn_y = float(brain.meta.pad_center[1])
         self._alive = False
 
@@ -263,27 +265,21 @@ class BrainPlayer:
         if not self._alive or self._spaz is None:
             return False
         try:
-            return bool(self._spaz.is_alive())
+            return bool(self._spaz.is_alive()) and int(
+                getattr(self._spaz, 'hitpoints', 0) or 0
+            ) > 0
         except Exception:
             return False
 
-    def start(self) -> None:
+    def spawn(self) -> None:
         self.stop()
         with self.activity.context:
             pos = self._pick_spawn()
             self._spawn_y = float(pos[1])
             self._spaz = self._make_spaz(pos)
-            self._episode_t0 = bs.time()
             self._alive = True
-            interval = float(self.brain.hyper.tick_interval)
-            self._timer = bs.Timer(interval, self._tick, repeat=True)
-            babase.screenmessage(
-                f'Brain bot spawned ({self.brain.meta.map_name})',
-                color=(0.2, 1.0, 0.4),
-            )
 
     def stop(self) -> None:
-        self._timer = None
         self._alive = False
         if self._spaz is not None:
             try:
@@ -296,17 +292,18 @@ class BrainPlayer:
     def _pick_spawn(self) -> tuple[float, float, float]:
         mmap = getattr(self.activity, 'map', None)
         if mmap is not None:
-            pts = getattr(mmap, 'ffa_spawn_points', None) or []
+            try:
+                p = mmap.get_start_position(self.side)
+                return (float(p[0]), float(p[1]), float(p[2]))
+            except Exception:
+                pass
+            pts = getattr(mmap, 'spawn_points', None) or []
             if pts:
-                if len(pts) >= 3:
-                    sx = sum(float(p[0]) for p in pts) / len(pts)
-                    sy = sum(float(p[1]) for p in pts) / len(pts)
-                    sz = sum(float(p[2]) for p in pts) / len(pts)
-                    return (sx, sy, sz)
-                p = pts[0]
+                p = pts[self.side % len(pts)]
                 return (float(p[0]), float(p[1]), float(p[2]))
         c = self.brain.meta.pad_center
-        return (float(c[0]), float(c[1]), float(c[2]))
+        x = float(c[0]) + (-10.0 if self.side == 0 else 10.0)
+        return (x, float(c[1]), float(c[2]))
 
     def _make_spaz(self, pos: tuple[float, float, float]) -> Any:
         from bascenev1lib.actor.spaz import Spaz
@@ -318,66 +315,58 @@ class BrainPlayer:
             start_invincible=True,
             can_accept_powerups=False,
         )
+        spaz.bomb_count = 0
         spaz.autoretain()
-        spaz.handlemessage(bs.StandMessage(position=pos, angle=0.0))
+        angle = 0.0 if pos[0] < 0 else 180.0
+        spaz.handlemessage(bs.StandMessage(position=pos, angle=angle))
         return spaz
 
-    def _observe(self) -> list[float] | None:
+    def observe(self) -> list[float] | None:
         assert self._spaz is not None
         node = self._spaz.node
         if not node:
             return None
+        if self.opponent is None or self.opponent._spaz is None:
+            return None
+        foe_node = self.opponent._spaz.node
+        if not foe_node:
+            return None
+
         meta = self.brain.meta
         cx, cy, cz = meta.pad_center
         pos = node.position
         vel = node.velocity
+        fpos = foe_node.position
+        fvel = foe_node.velocity
         dx = (pos[0] - cx) * meta.pos_scale
         dy = (pos[1] - cy) * meta.pos_scale
         dz = (pos[2] - cz) * meta.pos_scale
         vx = vel[0] * meta.vel_scale
         vy = vel[1] * meta.vel_scale
         vz = vel[2] * meta.vel_scale
-        height = (pos[1] - self._spawn_y) * meta.pos_scale
-        dist = math.sqrt(dx * dx + dz * dz)
-        near = 1.0 if (dist / meta.pos_scale) > meta.near_edge_radius else 0.0
+        ox = (fpos[0] - pos[0]) * meta.pos_scale
+        oy = (fpos[1] - pos[1]) * meta.pos_scale
+        oz = (fpos[2] - pos[2]) * meta.pos_scale
         speed = math.sqrt(vx * vx + vz * vz)
-        et = bs.time() - self._episode_t0
-        obs = [
-            dx,
-            dy,
-            dz,
-            vx,
-            vy,
-            vz,
-            height,
-            near,
-            dist,
-            speed,
-            math.sin(et),
-            math.cos(et),
-        ]
+        foe_speed = math.sqrt(
+            (fvel[0] * meta.vel_scale) ** 2 + (fvel[2] * meta.vel_scale) ** 2
+        )
+        hp = int(getattr(self._spaz, 'hitpoints', _DEFAULT_HITPOINTS) or 0)
+        hp_frac = max(0.0, min(1.0, hp / float(_DEFAULT_HITPOINTS)))
+        obs = [dx, dy, dz, vx, vy, vz, ox, oy, oz, speed, foe_speed, hp_frac]
         assert len(obs) == OBS_SIZE
         return obs
 
-    def _apply_action(self, action: int) -> None:
-        assert self._spaz is not None
-        mx, my, run = Brain.decode_action(action)
-        self._spaz.on_move_left_right(mx)
-        self._spaz.on_move_up_down(my)
-        self._spaz.on_run(run)
-
-    def _tick(self) -> None:
+    def tick(self) -> None:
         if not self.alive:
             self.stop()
             return
         assert self._spaz is not None
         node = self._spaz.node
-        if node:
-            if node.position[1] < self._spawn_y - self.brain.meta.fall_y_drop:
-                self.stop()
-                babase.screenmessage('Brain bot fell.', color=(1.0, 0.5, 0.2))
-                return
-        obs = self._observe()
+        if node and node.position[1] < self._spawn_y - self.brain.meta.fall_y_drop:
+            self.stop()
+            return
+        obs = self.observe()
         if obs is None:
             self.stop()
             return
@@ -385,7 +374,75 @@ class BrainPlayer:
             action, _, _ = self.brain.act_greedy(obs)
         else:
             action, _, _ = self.brain.act(obs)
-        self._apply_action(action)
+        mx, my, run, punch = Brain.decode_action(action)
+        self._spaz.on_move_left_right(mx)
+        self._spaz.on_move_up_down(my)
+        self._spaz.on_run(run)
+        if punch:
+            self._spaz.on_punch_press()
+            self._spaz.on_punch_release()
+
+
+class BrainDuel:
+    """Two BrainFighters sharing one brain on opposite sides of the map."""
+
+    def __init__(
+        self,
+        activity: bs.Activity,
+        brain: Brain,
+        *,
+        greedy: bool = True,
+    ) -> None:
+        self.activity = activity
+        self.brain = brain
+        self._timer: bs.Timer | None = None
+        self.fighters = [
+            BrainFighter(
+                activity,
+                brain,
+                side=0,
+                greedy=greedy,
+                color=(0.2, 0.7, 1.0),
+            ),
+            BrainFighter(
+                activity,
+                brain,
+                side=1,
+                greedy=greedy,
+                color=(1.0, 0.35, 0.2),
+            ),
+        ]
+        self.fighters[0].opponent = self.fighters[1]
+        self.fighters[1].opponent = self.fighters[0]
+
+    def start(self) -> None:
+        self.stop()
+        with self.activity.context:
+            for f in self.fighters:
+                f.spawn()
+            interval = float(self.brain.hyper.tick_interval)
+            self._timer = bs.Timer(interval, self._tick, repeat=True)
+            babase.screenmessage(
+                f'Brain duel on {self.brain.meta.map_name} '
+                f'(flat={self.brain.meta.flat_map})',
+                color=(0.2, 1.0, 0.4),
+            )
+
+    def stop(self) -> None:
+        self._timer = None
+        for f in self.fighters:
+            f.stop()
+
+    def _tick(self) -> None:
+        alive = 0
+        for f in self.fighters:
+            if f.alive:
+                f.tick()
+                if f.alive:
+                    alive += 1
+        if alive < 2:
+            self.stop()
+            babase.screenmessage('Brain duel finished.', color=(1.0, 0.8, 0.3))
 
 
 # ---------------------------------------------------------------------------
@@ -397,11 +454,10 @@ def _default_brain_path() -> str:
     env = babase.app.env
     user = env.python_directory_user
     if user:
-        return os.path.join(user, 'brains', 'spaz_walk.brain')
+        return os.path.join(user, 'brains', 'spaz_fight.brain')
     here = os.path.dirname(os.path.abspath(__file__))
-    # Repo layout: walktrain/walktrain_brain.py → ../output/
     repo = os.path.dirname(here)
-    return os.path.join(repo, 'output', 'spaz_walk.brain')
+    return os.path.join(repo, 'output', 'spaz_fight.brain')
 
 
 def _resolve_brain_path() -> str:
@@ -427,7 +483,10 @@ _COMMAND_GUIDE = (
 )
 
 # Filled before launching _BrainMapTeamSession (new_host_session takes a type).
-_FORCE_MAP_NAME = 'The Pad'
+_FORCE_MAP_NAME = 'Football Stadium'
+_FLAT_NO_POWERUPS = True
+_FLAT_NO_FLAGS = True
+_FLAT_MAP = True
 
 
 def _current_map_name() -> str | None:
@@ -458,11 +517,27 @@ def _parse_chat_line(line: str) -> tuple[str, str]:
     return user.strip(), message.strip()
 
 
+def _apply_flat_rules(meta: BrainMeta) -> None:
+    """Copy flat-map rules from brain meta into session globals."""
+    global _FORCE_MAP_NAME, _FLAT_NO_POWERUPS, _FLAT_NO_FLAGS, _FLAT_MAP
+    _FORCE_MAP_NAME = meta.map_name or 'Football Stadium'
+    _FLAT_MAP = bool(meta.flat_map)
+    _FLAT_NO_POWERUPS = bool(meta.no_powerups) if _FLAT_MAP else bool(meta.no_powerups)
+    _FLAT_NO_FLAGS = bool(meta.no_flags) if _FLAT_MAP else bool(meta.no_flags)
+    # Flat brains always mean bare stadium — no extras.
+    if _FLAT_MAP:
+        _FLAT_NO_POWERUPS = True
+        _FLAT_NO_FLAGS = True
+
+
 class _BrainMapTeamSession(bs.DualTeamSession):
-    """Teams session whose playlist is forced to the brain's map."""
+    """Teams session forced to the brain's map (flat rules via powerup patch)."""
 
     @override
     def get_fixed_playlist(self) -> list[dict[str, Any]]:
+        # Death Match supports Football Stadium (melee). Flags are never
+        # spawned in DM; powerups are suppressed when brain.meta.flat_map /
+        # no_powerups is set (_install_flat_powerup_patch).
         return [
             {
                 'type': 'bascenev1lib.game.deathmatch.DeathMatchGame',
@@ -481,12 +556,47 @@ class _BrainMapTeamSession(bs.DualTeamSession):
         return False
 
 
+_ORIG_DM_POWERUPS = None
+
+
+def _install_flat_powerup_patch() -> None:
+    """Honor brain flat/no_powerups by skipping DeathMatch powerup rain."""
+    global _ORIG_DM_POWERUPS
+    if not _FLAT_NO_POWERUPS:
+        return
+    try:
+        from bascenev1lib.game.deathmatch import DeathMatchGame
+
+        if _ORIG_DM_POWERUPS is None:
+            _ORIG_DM_POWERUPS = DeathMatchGame.setup_standard_powerup_drops
+
+        def _skip(self: Any, enable_tnt: bool = True) -> None:
+            del self, enable_tnt
+
+        DeathMatchGame.setup_standard_powerup_drops = _skip  # type: ignore[method-assign]
+    except Exception as exc:
+        print(f'WalkTrain: could not patch powerups: {exc}', flush=True)
+
+
+def _restore_flat_powerup_patch() -> None:
+    global _ORIG_DM_POWERUPS
+    if _ORIG_DM_POWERUPS is None:
+        return
+    try:
+        from bascenev1lib.game.deathmatch import DeathMatchGame
+
+        DeathMatchGame.setup_standard_powerup_drops = _ORIG_DM_POWERUPS  # type: ignore[method-assign]
+    except Exception:
+        pass
+    _ORIG_DM_POWERUPS = None
+
+
 # ba_meta export babase.Plugin
 class WalkTrainBrainPlugin(babase.Plugin):
-    """Poll chat for /brainbot; start a map-matched teams game and spawn."""
+    """Poll chat for /brainbot; start a flat map-matched duel and spawn."""
 
     def __init__(self) -> None:
-        self._player: BrainPlayer | None = None
+        self._duel: BrainDuel | None = None
         self._chat_timer: babase.AppTimer | None = None
         self._chat_len = 0
         self._pending_spawn = False
@@ -514,6 +624,7 @@ class WalkTrainBrainPlugin(babase.Plugin):
     @override
     def on_app_shutdown(self) -> None:
         self._despawn()
+        _restore_flat_powerup_patch()
         self._chat_timer = None
         self._pending_spawn = False
         self._pending_guide = False
@@ -534,7 +645,6 @@ class WalkTrainBrainPlugin(babase.Plugin):
         if len(msgs) == self._chat_len:
             self._try_finish_pending_spawn()
             return
-        # Process only newly appended lines (usually the last one).
         new_msgs = msgs[self._chat_len :]
         self._chat_len = len(msgs)
         for line in new_msgs:
@@ -551,7 +661,7 @@ class WalkTrainBrainPlugin(babase.Plugin):
         if cmd in ('stop', 'kill', 'remove'):
             self._despawn()
             self._pending_spawn = False
-            babase.screenmessage('Brain bot removed.', color=(1.0, 0.8, 0.3))
+            babase.screenmessage('Brain duel removed.', color=(1.0, 0.8, 0.3))
             return
         if cmd in ('info', 'status'):
             self._show_info()
@@ -576,17 +686,18 @@ class WalkTrainBrainPlugin(babase.Plugin):
         cur = _current_map_name() or '(no active map)'
         babase.screenmessage(
             f'Brain map={meta.map_name} task={meta.task} '
+            f'flat={meta.flat_map} no_pu={meta.no_powerups} '
             f'eps={brain.episodes} current={cur}',
             color=(0.7, 0.9, 1.0),
         )
 
     def _despawn(self) -> None:
-        if self._player is not None:
+        if self._duel is not None:
             try:
-                self._player.stop()
+                self._duel.stop()
             except Exception:
                 pass
-            self._player = None
+            self._duel = None
 
     def _start_brain_game(self) -> None:
         path = _resolve_brain_path()
@@ -598,15 +709,15 @@ class WalkTrainBrainPlugin(babase.Plugin):
             )
             return
 
-        global _FORCE_MAP_NAME
-        _FORCE_MAP_NAME = brain.meta.map_name
+        _apply_flat_rules(brain.meta)
+        _install_flat_powerup_patch()
         self._want_map = brain.meta.map_name
         self._despawn()
         self._pending_spawn = True
         self._pending_guide = True
 
         babase.screenmessage(
-            f'Starting teams game on "{brain.meta.map_name}"…',
+            f'Starting flat duel on "{brain.meta.map_name}"…',
             color=(0.6, 0.9, 1.0),
         )
 
@@ -626,6 +737,7 @@ class WalkTrainBrainPlugin(babase.Plugin):
                 )
                 self._pending_spawn = False
                 self._pending_guide = False
+                _restore_flat_powerup_patch()
                 try:
                     from bascenev1lib import mainmenu
 
@@ -655,16 +767,15 @@ class WalkTrainBrainPlugin(babase.Plugin):
             self._pending_guide = False
             try:
                 bs.chatmessage(_COMMAND_GUIDE)
-                # Keep poll cursor in sync with the guide we just appended.
                 self._chat_len = len(bs.get_chat_messages())
             except Exception as exc:
                 print(f'WalkTrain guide chat failed: {exc}', flush=True)
 
         if self._pending_spawn:
             self._pending_spawn = False
-            self._spawn_bot_in(activity)
+            self._spawn_duel_in(activity)
 
-    def _spawn_bot_in(self, activity: bs.Activity) -> None:
+    def _spawn_duel_in(self, activity: bs.Activity) -> None:
         path = _resolve_brain_path()
         try:
             brain = _load_brain(path)
@@ -675,12 +786,12 @@ class WalkTrainBrainPlugin(babase.Plugin):
             return
         self._despawn()
         try:
-            player = BrainPlayer(activity, brain, greedy=_greedy_enabled())
-            player.start()
-            self._player = player
+            duel = BrainDuel(activity, brain, greedy=_greedy_enabled())
+            duel.start()
+            self._duel = duel
         except Exception as exc:
             babase.screenmessage(
-                f'Failed to spawn brain bot: {exc}', color=(1, 0.3, 0.3)
+                f'Failed to spawn brain duel: {exc}', color=(1, 0.3, 0.3)
             )
             print(f'WalkTrain Brain spawn error: {exc}', flush=True)
 
@@ -720,7 +831,7 @@ class _SettingsWindow:
             brain = _load_brain(path)
             meta_line = (
                 f'map={brain.meta.map_name}  task={brain.meta.task}  '
-                f'episodes={brain.episodes}'
+                f'flat={brain.meta.flat_map}  eps={brain.episodes}'
             )
         except Exception as exc:
             meta_line = f'load error: {exc}'
@@ -751,7 +862,7 @@ class _SettingsWindow:
             parent=self.root_widget,
             position=(30, height - 210),
             size=(width - 60, 40),
-            text='Chat /brainbot to start a teams game on the brain map.',
+            text='Chat /brainbot → flat Football Stadium duel (2 bots).',
             maxwidth=width - 70,
             scale=0.7,
             h_align='left',

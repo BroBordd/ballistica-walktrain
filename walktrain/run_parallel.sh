@@ -45,7 +45,7 @@ if [[ "$WORKERS" -lt 1 ]]; then
   WORKERS=1
 fi
 
-export WALKTRAIN_BRAIN="${WALKTRAIN_BRAIN:-$REPO_ROOT/output/spaz_walk.brain}"
+export WALKTRAIN_BRAIN="${WALKTRAIN_BRAIN:-$REPO_ROOT/output/spaz_fight.brain}"
 export WALKTRAIN_SPEED="${WALKTRAIN_SPEED:-8}"
 export WALKTRAIN_SAVE_EVERY="${WALKTRAIN_SAVE_EVERY:-1}"
 export WALKTRAIN_MAX_EP="${WALKTRAIN_MAX_EP:-20}"

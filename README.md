@@ -1,12 +1,18 @@
 # ballistica-walktrain
 
-Headless trainer: spawn a **Spaz** on **The Pad** and learn to walk without falling, using **real Ballistica physics** (same ODE math as the game). Progress saves to a resumable **`.brain`** checkpoint (LLM-style continue).
+Headless trainer: spawn **two Spazzes** on a **flat Football Stadium** (no
+powerups, no flags) and learn to **fight** with **real Ballistica physics**.
+Each agent sees the other's **3D node position**; more **momentum** → more
+punch damage (stock Spaz `HitMessage` / impulse API). Progress saves to a
+resumable **`.brain`** checkpoint.
 
 > **Agents / continuing work:** start at [`docs/HANDOFF.md`](docs/HANDOFF.md), then [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Status
 
-Headless training against real Ballistica physics is **working**: episodes log, falls occur (The Pad railing removed), and `output/spaz_walk.brain` saves/resumes. Policy quality is still being trained/tuned — see [`docs/HANDOFF.md`](docs/HANDOFF.md).
+Walk-no-fall training on The Pad was retired. Current task is **self-play
+duel** on Football Stadium (`task=duel_fight`, brain v2). Checkpoint default:
+`output/spaz_fight.brain`.
 
 ## Requirements
 
@@ -30,13 +36,11 @@ export BALLISTICA_ROOT=../ballistica
 ./walktrain/run_parallel.sh
 ```
 
-Checkpoint default: `output/spaz_walk.brain`. Rerun the same command to **resume**.
-
-Parallel mode runs several `ballisticakit_headless` processes (CPU ODE — not a GPU Isaac Gym clone) that Hogwild-update one locked `.brain`, at high debug speed (`2^WALKTRAIN_SPEED`).
+Checkpoint default: `output/spaz_fight.brain`. Rerun the same command to **resume**.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `WALKTRAIN_BRAIN` | `output/spaz_walk.brain` | Checkpoint path |
+| `WALKTRAIN_BRAIN` | `output/spaz_fight.brain` | Checkpoint path |
 | `WALKTRAIN_SPEED` | `3` single / `8` parallel | Wall-clock `2**n` via debug speed exponent |
 | `WALKTRAIN_WORKERS` | `nproc` (max 8) | Parallel headless processes (`run_parallel.sh`) |
 | `WALKTRAIN_SAVE_EVERY` | `5` / `2` parallel | Episodes between saves |
@@ -47,7 +51,7 @@ Parallel mode runs several `ballisticakit_headless` processes (CPU ODE — not a
 
 ```
 walktrain/brain.py              # MLP + Adam + .brain I/O (pure Python)
-walktrain/activity.py           # Session/Activity, Spaz, rewards
+walktrain/activity.py           # Session/Activity, 2 Spazzes, duel rewards
 walktrain/boot.py               # --exec entrypoint
 walktrain/walktrain_brain.py    # Standalone BombSquad API 9 playback plugin
 walktrain/run.sh                # Launch helper
@@ -55,24 +59,20 @@ walktrain/run.sh                # Launch helper
 
 ## Play a brain in BombSquad 1.8 (API 9)
 
-`.brain` files now store **metadata** (map trained on, obs scales, task, etc.).
-`/brainbot` starts a teams Death Match forced to that map, then spawns the bot.
+`.brain` files store **flat-map metadata** (`flat_map`, `no_powerups`,
+`no_flags`, map name). `/brainbot` reads those rules, starts a teams Death
+Match on Football Stadium without powerup rain, and spawns **two** fighting
+bots on opposite sides.
 
 ```bash
-# Install one plugin file + brain into BallisticaKit mods
 ./walktrain/install_plugin.sh          # default: ~/.ballisticakit/mods
-# or: ./walktrain/install_plugin.sh /path/to/BombSquad/mods
 ```
 
-1. Enable **walktrain_brain.WalkTrainBrainPlugin** under Settings → Plugins (restart if needed).
-2. Chat **`/brainbot`** — starts a teams Death Match on the brain’s map and spawns the bot.
-3. **`/brainbot stop`** removes the bot; **`/brainbot info`** shows brain vs current map.
+1. Enable **walktrain_brain.WalkTrainBrainPlugin** under Settings → Plugins.
+2. Chat **`/brainbot`** — flat stadium duel from brain meta.
+3. **`/brainbot stop`** / **`/brainbot info`**.
 
-Default brain path: `mods/brains/spaz_walk.brain`. Override in the plugin settings UI, or stamp an older checkpoint with:
-
-```bash
-PYTHONPATH=. python3 -m walktrain.stamp_meta output/spaz_walk.brain
-```
+Default brain path: `mods/brains/spaz_fight.brain`.
 
 ## License
 
