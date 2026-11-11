@@ -3,8 +3,9 @@
 """Standalone BombSquad 1.8 / API 9 plugin: play a walktrain ``.brain``.
 
 Drop this single file into your mods folder (plus a brain under
-``mods/brains/spaz_walk.brain``). Enable under Settings → Plugins, host a
-match on the map named in the brain metadata, then chat ``/brainbot``.
+``mods/brains/spaz_walk.brain``). Enable under Settings → Plugins, then chat
+``/brainbot`` — the plugin starts a teams Death Match on the brain's map and
+spawns the bot.
 """
 
 from __future__ import annotations
@@ -421,6 +422,14 @@ def _greedy_enabled() -> bool:
     return bool(babase.app.config.get(_CONFIG_GREEDY, True))
 
 
+_COMMAND_GUIDE = (
+    'WalkTrain commands: /brainbot  |  /brainbot stop  |  /brainbot info'
+)
+
+# Filled before launching _BrainMapTeamSession (new_host_session takes a type).
+_FORCE_MAP_NAME = 'The Pad'
+
+
 def _current_map_name() -> str | None:
     activity = bs.get_foreground_host_activity()
     if activity is None:
@@ -441,32 +450,73 @@ def _load_brain(path: str) -> Brain:
     return Brain.load(path)
 
 
+def _parse_chat_line(line: str) -> tuple[str, str]:
+    """Split ``user: message`` from ``bs.get_chat_messages`` entries."""
+    if ':' not in line:
+        return '', line.strip()
+    user, message = line.split(':', 1)
+    return user.strip(), message.strip()
+
+
+class _BrainMapTeamSession(bs.DualTeamSession):
+    """Teams session whose playlist is forced to the brain's map."""
+
+    @override
+    def get_fixed_playlist(self) -> list[dict[str, Any]]:
+        return [
+            {
+                'type': 'bascenev1lib.game.deathmatch.DeathMatchGame',
+                'settings': {
+                    'map': _FORCE_MAP_NAME,
+                    'Kills to Win Per Player': 5,
+                    'Time Limit': 0,
+                    'Respawn Times': 1.0,
+                    'Epic Mode': False,
+                },
+            }
+        ]
+
+    @override
+    def allows_tutorial(self) -> bool:
+        return False
+
+
 # ba_meta export babase.Plugin
 class WalkTrainBrainPlugin(babase.Plugin):
-    """Load a walktrain brain and spawn a playback bot on a matching map."""
+    """Poll chat for /brainbot; start a map-matched teams game and spawn."""
 
     def __init__(self) -> None:
         self._player: BrainPlayer | None = None
-        self._orig_filter = None
+        self._chat_timer: babase.AppTimer | None = None
+        self._chat_len = 0
+        self._pending_spawn = False
+        self._pending_guide = False
+        self._want_map: str | None = None
 
     @override
     def on_app_running(self) -> None:
-        self._install_chat_hook()
+        try:
+            self._chat_len = len(bs.get_chat_messages())
+        except Exception:
+            self._chat_len = 0
+        self._chat_timer = babase.AppTimer(0.25, self._poll_chat, repeat=True)
         path = _resolve_brain_path()
         babase.screenmessage(
-            f'WalkTrain Brain plugin ready. Brain: {os.path.basename(path)}',
+            f'WalkTrain Brain ready. Chat /brainbot. Brain: {os.path.basename(path)}',
             color=(0.6, 0.9, 1.0),
         )
         print(
-            'WalkTrain Brain plugin: chat /brainbot to spawn, '
-            f'/brainbot stop to remove, brain={path}',
+            'WalkTrain Brain plugin: polling chat for /brainbot; '
+            f'brain={path}',
             flush=True,
         )
 
     @override
     def on_app_shutdown(self) -> None:
         self._despawn()
-        self._uninstall_chat_hook()
+        self._chat_timer = None
+        self._pending_spawn = False
+        self._pending_guide = False
 
     @override
     def has_settings_ui(self) -> bool:
@@ -476,56 +526,42 @@ class WalkTrainBrainPlugin(babase.Plugin):
     def show_settings_ui(self, source_widget: Any | None) -> None:
         _SettingsWindow(source_widget)
 
-    def _install_chat_hook(self) -> None:
-        import bascenev1._hooks as hooks
-
-        if self._orig_filter is not None:
+    def _poll_chat(self) -> None:
+        try:
+            msgs = bs.get_chat_messages()
+        except Exception:
             return
-        self._orig_filter = hooks.filter_chat_message
-        plugin = self
-
-        def _filter(msg: str, client_id: int) -> str | None:
-            handled = plugin._handle_chat(msg, client_id)
-            if handled:
-                return None
-            assert plugin._orig_filter is not None
-            return plugin._orig_filter(msg, client_id)
-
-        hooks.filter_chat_message = _filter  # type: ignore[assignment]
-
-    def _uninstall_chat_hook(self) -> None:
-        if self._orig_filter is None:
+        if len(msgs) == self._chat_len:
+            self._try_finish_pending_spawn()
             return
-        import bascenev1._hooks as hooks
+        # Process only newly appended lines (usually the last one).
+        new_msgs = msgs[self._chat_len :]
+        self._chat_len = len(msgs)
+        for line in new_msgs:
+            _user, message = _parse_chat_line(line)
+            self._handle_message(message)
+        self._try_finish_pending_spawn()
 
-        hooks.filter_chat_message = self._orig_filter  # type: ignore[assignment]
-        self._orig_filter = None
-
-    def _handle_chat(self, msg: str, client_id: int) -> bool:
-        text = msg.strip()
+    def _handle_message(self, message: str) -> None:
+        text = message.strip()
         if not text.lower().startswith('/brainbot'):
-            return False
-        if client_id not in (-1,):
-            babase.screenmessage(
-                'Only the host can spawn the brain bot.', color=(1, 0.5, 0.2)
-            )
-            return True
+            return
         parts = text.split()
         cmd = parts[1].lower() if len(parts) > 1 else 'spawn'
         if cmd in ('stop', 'kill', 'remove'):
             self._despawn()
+            self._pending_spawn = False
             babase.screenmessage('Brain bot removed.', color=(1.0, 0.8, 0.3))
-            return True
+            return
         if cmd in ('info', 'status'):
             self._show_info()
-            return True
+            return
         if cmd in ('spawn', 'start', 'play'):
-            self._spawn()
-            return True
+            self._start_brain_game()
+            return
         babase.screenmessage(
             'Usage: /brainbot [spawn|stop|info]', color=(1, 1, 0.3)
         )
-        return True
 
     def _show_info(self) -> None:
         path = _resolve_brain_path()
@@ -552,22 +588,7 @@ class WalkTrainBrainPlugin(babase.Plugin):
                 pass
             self._player = None
 
-    def _spawn(self) -> None:
-        activity = bs.get_foreground_host_activity()
-        if activity is None:
-            babase.screenmessage(
-                'No active host game. Start a match first.',
-                color=(1, 0.4, 0.3),
-            )
-            return
-
-        map_name = _current_map_name()
-        if not map_name:
-            babase.screenmessage(
-                'Current activity has no map yet.', color=(1, 0.4, 0.3)
-            )
-            return
-
+    def _start_brain_game(self) -> None:
         path = _resolve_brain_path()
         try:
             brain = _load_brain(path)
@@ -577,14 +598,81 @@ class WalkTrainBrainPlugin(babase.Plugin):
             )
             return
 
-        if not brain.meta.matches_map(map_name):
-            babase.screenmessage(
-                f'Map mismatch: brain trained on "{brain.meta.map_name}", '
-                f'current is "{map_name}".',
-                color=(1.0, 0.35, 0.25),
-            )
+        global _FORCE_MAP_NAME
+        _FORCE_MAP_NAME = brain.meta.map_name
+        self._want_map = brain.meta.map_name
+        self._despawn()
+        self._pending_spawn = True
+        self._pending_guide = True
+
+        babase.screenmessage(
+            f'Starting teams game on "{brain.meta.map_name}"…',
+            color=(0.6, 0.9, 1.0),
+        )
+
+        def _run() -> None:
+            try:
+                if babase.app.classic is not None:
+                    babase.app.classic.save_ui_state()
+            except Exception:
+                pass
+            try:
+                bs.new_host_session(_BrainMapTeamSession)
+            except Exception as exc:
+                print(f'WalkTrain Brain session error: {exc}', flush=True)
+                babase.screenmessage(
+                    f'Failed to start session: {exc}',
+                    color=(1, 0.3, 0.3),
+                )
+                self._pending_spawn = False
+                self._pending_guide = False
+                try:
+                    from bascenev1lib import mainmenu
+
+                    bs.new_host_session(mainmenu.MainMenuSession)
+                except Exception:
+                    pass
+
+        try:
+            babase.fade_screen(False, endcall=_run)
+        except Exception:
+            _run()
+
+    def _try_finish_pending_spawn(self) -> None:
+        if not self._pending_spawn and not self._pending_guide:
+            return
+        activity = bs.get_foreground_host_activity()
+        if activity is None or not isinstance(activity, bs.GameActivity):
+            return
+        map_name = _current_map_name()
+        if not map_name:
+            return
+        want = self._want_map
+        if want and map_name.strip().casefold() != want.strip().casefold():
             return
 
+        if self._pending_guide:
+            self._pending_guide = False
+            try:
+                bs.chatmessage(_COMMAND_GUIDE)
+                # Keep poll cursor in sync with the guide we just appended.
+                self._chat_len = len(bs.get_chat_messages())
+            except Exception as exc:
+                print(f'WalkTrain guide chat failed: {exc}', flush=True)
+
+        if self._pending_spawn:
+            self._pending_spawn = False
+            self._spawn_bot_in(activity)
+
+    def _spawn_bot_in(self, activity: bs.Activity) -> None:
+        path = _resolve_brain_path()
+        try:
+            brain = _load_brain(path)
+        except Exception as exc:
+            babase.screenmessage(
+                f'Could not load brain: {exc}', color=(1, 0.3, 0.3)
+            )
+            return
         self._despawn()
         try:
             player = BrainPlayer(activity, brain, greedy=_greedy_enabled())
@@ -663,7 +751,7 @@ class _SettingsWindow:
             parent=self.root_widget,
             position=(30, height - 210),
             size=(width - 60, 40),
-            text='Chat /brainbot while hosting on the matching map.',
+            text='Chat /brainbot to start a teams game on the brain map.',
             maxwidth=width - 70,
             scale=0.7,
             h_align='left',

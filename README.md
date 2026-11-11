@@ -56,7 +56,7 @@ walktrain/run.sh                # Launch helper
 ## Play a brain in BombSquad 1.8 (API 9)
 
 `.brain` files now store **metadata** (map trained on, obs scales, task, etc.).
-The plugin refuses to spawn if the live map does not match.
+`/brainbot` starts a teams Death Match forced to that map, then spawns the bot.
 
 ```bash
 # Install one plugin file + brain into BallisticaKit mods
@@ -65,9 +65,8 @@ The plugin refuses to spawn if the live map does not match.
 ```
 
 1. Enable **walktrain_brain.WalkTrainBrainPlugin** under Settings → Plugins (restart if needed).
-2. Host a game on **The Pad** (the map in the brain’s `meta.map_name`).
-3. Chat **`/brainbot`** to spawn a bot that runs the trained policy.
-4. **`/brainbot stop`** removes it; **`/brainbot info`** shows brain vs current map.
+2. Chat **`/brainbot`** — starts a teams Death Match on the brain’s map and spawns the bot.
+3. **`/brainbot stop`** removes the bot; **`/brainbot info`** shows brain vs current map.
 
 Default brain path: `mods/brains/spaz_walk.brain`. Override in the plugin settings UI, or stamp an older checkpoint with:
 

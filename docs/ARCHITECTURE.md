@@ -38,7 +38,7 @@ Physics identity: **engine ODE**, not approximated in Python. WalkTrain only sup
 
 ### Playback plugin (`walktrain/walktrain_brain.py`)
 
-Standalone BombSquad **1.8 / API 9** plugin (`# ba_meta require api 9`) — one file, no package deps. Loads a `.brain`, checks `activity.map.getname()` against `meta.map_name`, then ticks an inlined `BrainPlayer` (greedy by default). Host chat: `/brainbot`, `/brainbot stop`, `/brainbot info`. Install via `install_plugin.sh` → `mods/walktrain_brain.py`.
+Standalone BombSquad **1.8 / API 9** plugin (`# ba_meta require api 9`) — one file, no package deps. Polls `bs.get_chat_messages` for `/brainbot`, then starts a teams Death Match forced to `meta.map_name`, posts a command guide via `bs.chatmessage`, and ticks an inlined `BrainPlayer` (greedy by default). Commands: `/brainbot`, `/brainbot stop`, `/brainbot info`. Install via `install_plugin.sh` → `mods/walktrain_brain.py`.
 
 ### Observation (12)
 

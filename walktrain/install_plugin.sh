@@ -29,4 +29,4 @@ else
 fi
 
 echo "Enable: Settings → Plugins → walktrain_brain.WalkTrainBrainPlugin"
-echo "Play: host a game on The Pad, then chat /brainbot"
+echo "Play: chat /brainbot (starts a teams game on the brain map)"
