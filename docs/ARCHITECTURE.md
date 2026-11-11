@@ -32,8 +32,13 @@ Physics identity: **engine ODE**, not approximated in Python. WalkTrain only sup
 - MLP: obs(12) → hidden(64) → policy(18) + value(1).
 - Softmax policy; REINFORCE with learned baseline; Adam.
 - Checkpoint: **gzipped JSON** (`.brain`), atomic write via `*.tmp.PID` then `os.replace`.
-- Contents: weights, Adam moments, hyperparams, episodes/steps, best survival, RNG state, timestamps.
+- Contents: weights, Adam moments, hyperparams, **`meta`** (map/task/obs scales), episodes/steps, best survival, RNG state, timestamps.
 - `BRAIN_VERSION = 1` — bump if obs/action layout changes; loaders reject mismatches.
+- `meta` is optional on load (defaults to The Pad walk-train); always written on save.
+
+### Playback plugin (`walktrain/plugin.py`)
+
+BombSquad **1.8 / API 9** plugin (`# ba_meta require api 9`). Loads a `.brain`, checks `activity.map.getname()` against `meta.map_name`, then ticks `BrainPlayer` (greedy policy by default) on a spawned Spaz. Host chat: `/brainbot`, `/brainbot stop`, `/brainbot info`.
 
 ### Observation (12)
 

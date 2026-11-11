@@ -51,6 +51,64 @@ N_ACTIONS = N_DIRS * 2  # * run bit
 
 
 @dataclass
+class BrainMeta:
+    """Where/how this brain was trained — used by playback plugins.
+
+    Old checkpoints without a ``meta`` block default to The Pad walk-train
+    values so existing ``.brain`` files keep working.
+    """
+
+    map_name: str = 'The Pad'
+    map_type: str = 'ThePad'
+    task: str = 'walk_no_fall'
+    trainer: str = 'walktrain'
+    pad_center: tuple[float, float, float] = (0.46, 4.38, -3.0)
+    near_edge_radius: float = 5.8
+    pos_scale: float = 0.12
+    vel_scale: float = 0.08
+    fall_y_drop: float = 3.5
+    railing_removed_in_training: bool = True
+    notes: str = (
+        'Trained headless on The Pad with bumper railing removed. '
+        'Obs/actions are walktrain v1.'
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data['pad_center'] = [float(x) for x in self.pad_center]
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> BrainMeta:
+        if not data:
+            return cls()
+        center = data.get('pad_center', (0.46, 4.38, -3.0))
+        if not isinstance(center, (list, tuple)) or len(center) != 3:
+            center = (0.46, 4.38, -3.0)
+        return cls(
+            map_name=str(data.get('map_name', 'The Pad')),
+            map_type=str(data.get('map_type', 'ThePad')),
+            task=str(data.get('task', 'walk_no_fall')),
+            trainer=str(data.get('trainer', 'walktrain')),
+            pad_center=(float(center[0]), float(center[1]), float(center[2])),
+            near_edge_radius=float(data.get('near_edge_radius', 5.8)),
+            pos_scale=float(data.get('pos_scale', 0.12)),
+            vel_scale=float(data.get('vel_scale', 0.08)),
+            fall_y_drop=float(data.get('fall_y_drop', 3.5)),
+            railing_removed_in_training=bool(
+                data.get('railing_removed_in_training', True)
+            ),
+            notes=str(data.get('notes', cls.notes)),
+        )
+
+    def matches_map(self, map_name: str) -> bool:
+        """True if ``map_name`` is the map this brain was trained for."""
+        want = self.map_name.strip().casefold()
+        got = map_name.strip().casefold()
+        return want == got
+
+
+@dataclass
 class HyperParams:
     """Trainable / architectural knobs stored in the brain file."""
 
@@ -112,9 +170,11 @@ class Brain:
         self,
         *,
         hyper: HyperParams | None = None,
+        meta: BrainMeta | None = None,
         seed: int | None = None,
     ) -> None:
         self.hyper = hyper or HyperParams()
+        self.meta = meta or BrainMeta()
         self.episodes = 0
         self.steps = 0
         self.best_survival = 0.0
@@ -168,6 +228,13 @@ class Brain:
             if r <= cum:
                 action = i
                 break
+        p = max(probs[action], 1e-8)
+        return action, math.log(p), value
+
+    def act_greedy(self, obs: Sequence[float]) -> tuple[int, float, float]:
+        """Pick the highest-probability action (playback / eval)."""
+        probs, value, _ = self.forward(obs)
+        action = max(range(len(probs)), key=lambda i: probs[i])
         p = max(probs[action], 1e-8)
         return action, math.log(p), value
 
@@ -334,6 +401,7 @@ class Brain:
             'brain_version': BRAIN_VERSION,
             'obs_size': OBS_SIZE,
             'n_actions': N_ACTIONS,
+            'meta': self.meta.to_dict(),
             'hyper': asdict(self.hyper),
             'episodes': self.episodes,
             'steps': self.steps,
@@ -365,7 +433,11 @@ class Brain:
             )
         if data.get('obs_size') != OBS_SIZE or data.get('n_actions') != N_ACTIONS:
             raise ValueError('brain obs/action size mismatch')
-        brain = cls(hyper=HyperParams(**data['hyper']), seed=data['seed'])
+        brain = cls(
+            hyper=HyperParams(**data['hyper']),
+            meta=BrainMeta.from_dict(data.get('meta')),
+            seed=data['seed'],
+        )
         brain.episodes = int(data['episodes'])
         brain.steps = int(data['steps'])
         brain.best_survival = float(data['best_survival'])
@@ -473,6 +545,7 @@ class Brain:
         self.best_survival = max(self.best_survival, other.best_survival)
         self.total_reward = max(self.total_reward, other.total_reward)
         self.hyper = other.hyper
+        self.meta = other.meta
         self._loaded_mtime = mtime
         self._pending_episodes = pending_ep
         self._pending_steps = pending_st

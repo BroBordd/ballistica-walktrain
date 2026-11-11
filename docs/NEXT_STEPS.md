@@ -45,9 +45,10 @@ Expect early fall rate high but not 100%; survival should trend up if REINFORCE 
 
 ## 3. Optional improvements
 
-- [ ] Eval mode: greedy argmax, no `learn_episode`, report survival stats
+- [x] Eval / playback: greedy argmax via `Brain.act_greedy` + BombSquad plugin
 - [ ] Add jump bit to action space (bump `BRAIN_VERSION`) — railings-off makes jump optional
-- [ ] `ba_meta` Plugin export so training can enable without `--exec`
+- [x] `ba_meta` Plugin export (`walktrain.plugin.WalkTrainBrainPlugin`, API 9)
+- [x] Brain `meta` block (map name, obs scales) for map-checked playback
 - [ ] Unit tests for near-edge heuristic / action decode (brain save/load already smoke-tested)
 - [x] Shared-file locking + multi-worker Hogwild (`run_parallel.sh`, `save_shared`/`pull_shared`)
 - [ ] Sync `ballistica/walktrain/` copy or delete it — canonical tree is `ballistica-walktrain/`

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Sequence, override
 import babase
 import bascenev1 as bs
 
-from walktrain.brain import OBS_SIZE, Brain, HyperParams
+from walktrain.brain import OBS_SIZE, Brain, BrainMeta, HyperParams
 
 if TYPE_CHECKING:
     from bascenev1lib.actor.spaz import Spaz
@@ -91,6 +91,33 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
                     settings.get('max_episode_seconds', 30.0)
                 ),
             ),
+            meta=BrainMeta(
+                map_name='The Pad',
+                map_type='ThePad',
+                task='walk_no_fall',
+                trainer='walktrain',
+                pad_center=_PAD_CENTER,
+                near_edge_radius=_NEAR_EDGE_RADIUS,
+                pos_scale=_POS_SCALE,
+                vel_scale=_VEL_SCALE,
+                fall_y_drop=_FALL_Y_DROP,
+                railing_removed_in_training=True,
+            ),
+        )
+        # Keep map/obs metadata in sync with this trainer even for
+        # older checkpoints that predate the meta block.
+        self.brain.meta = BrainMeta(
+            map_name='The Pad',
+            map_type='ThePad',
+            task='walk_no_fall',
+            trainer='walktrain',
+            pad_center=_PAD_CENTER,
+            near_edge_radius=_NEAR_EDGE_RADIUS,
+            pos_scale=_POS_SCALE,
+            vel_scale=_VEL_SCALE,
+            fall_y_drop=_FALL_Y_DROP,
+            railing_removed_in_training=True,
+            notes=self.brain.meta.notes,
         )
         # Env/boot settings win over checkpoint hyper for wall-clock knobs.
         self._speed_override = (

@@ -14,9 +14,12 @@ checkpoint.
 
 | File | Role |
 |------|------|
-| `brain.py` | Pure-Python MLP policy + value baseline, save/load |
+| `brain.py` | Pure-Python MLP policy + value baseline, save/load + `meta` |
 | `activity.py` | `WalkTrainSession` / `WalkTrainActivity` (Spaz + The Pad) |
 | `boot.py` | `--exec` entry: hijacks host session after boot |
+| `plugin.py` | BombSquad 1.8 / API 9 plugin — play a `.brain` in-game |
+| `player.py` | Inference Spaz driven by a loaded brain |
+| `install_plugin.sh` | Copy package + brain into mods/ |
 | `run.sh` | Finds/builds headless binary and starts training |
 | `output/spaz_walk.brain` | Default checkpoint (created on first save) |
 

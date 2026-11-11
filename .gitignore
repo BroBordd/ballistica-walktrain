@@ -1,10 +1,15 @@
 # Brain checkpoints (large / regenerable) — keep directory, ignore weights
 output/*.brain
+output/*.brain.*
 output/*.brain.tmp.*
 output/*.brain.lock
 output/logs/
 *.brain
+*.brain.*
 *.brain.lock
+
+# Keep a tiny placeholder so output/ exists in clones
+!output/.gitkeep
 
 # Python
 __pycache__/
