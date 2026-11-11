@@ -36,9 +36,9 @@ Physics identity: **engine ODE**, not approximated in Python. WalkTrain only sup
 - `BRAIN_VERSION = 1` — bump if obs/action layout changes; loaders reject mismatches.
 - `meta` is optional on load (defaults to The Pad walk-train); always written on save.
 
-### Playback plugin (`walktrain/plugin.py`)
+### Playback plugin (`walktrain/walktrain_brain.py`)
 
-BombSquad **1.8 / API 9** plugin (`# ba_meta require api 9`). Loads a `.brain`, checks `activity.map.getname()` against `meta.map_name`, then ticks `BrainPlayer` (greedy policy by default) on a spawned Spaz. Host chat: `/brainbot`, `/brainbot stop`, `/brainbot info`.
+Standalone BombSquad **1.8 / API 9** plugin (`# ba_meta require api 9`) — one file, no package deps. Loads a `.brain`, checks `activity.map.getname()` against `meta.map_name`, then ticks an inlined `BrainPlayer` (greedy by default). Host chat: `/brainbot`, `/brainbot stop`, `/brainbot info`. Install via `install_plugin.sh` → `mods/walktrain_brain.py`.
 
 ### Observation (12)
 

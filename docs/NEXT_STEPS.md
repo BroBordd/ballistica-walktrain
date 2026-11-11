@@ -47,7 +47,7 @@ Expect early fall rate high but not 100%; survival should trend up if REINFORCE 
 
 - [x] Eval / playback: greedy argmax via `Brain.act_greedy` + BombSquad plugin
 - [ ] Add jump bit to action space (bump `BRAIN_VERSION`) — railings-off makes jump optional
-- [x] `ba_meta` Plugin export (`walktrain.plugin.WalkTrainBrainPlugin`, API 9)
+- [x] `ba_meta` Plugin export (`walktrain_brain.WalkTrainBrainPlugin`, API 9, single file)
 - [x] Brain `meta` block (map name, obs scales) for map-checked playback
 - [ ] Unit tests for near-edge heuristic / action decode (brain save/load already smoke-tested)
 - [x] Shared-file locking + multi-worker Hogwild (`run_parallel.sh`, `save_shared`/`pull_shared`)

@@ -30,7 +30,7 @@ Repo owner: **BroBordd** on GitHub. Project: this repository.
 | End-to-end episodes + `.brain` save/resume | **Verified** |
 | Policy reliably avoids falls | **In progress** — checkpoint at **~1915 eps**; fall rate still being tuned. |
 | Brain `meta` (map/task/obs scales) | **Done** — written on save; `stamp_meta` for old files |
-| BombSquad 1.8 / API 9 playback plugin | **Done** — `walktrain.plugin.WalkTrainBrainPlugin`, `/brainbot` |
+| BombSquad 1.8 / API 9 playback plugin | **Done** — standalone `walktrain_brain.WalkTrainBrainPlugin`, `/brainbot` |
 
 **Initial prompt scope:** infrastructure is complete. Remaining work is **training quality** (and optional polish in `NEXT_STEPS.md`), not missing plumbing.
 

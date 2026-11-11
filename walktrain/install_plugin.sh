@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Install walktrain + brain file into BombSquad / BallisticaKit mods.
+# Install the standalone WalkTrain brain plugin + brain into BombSquad mods.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODS="${1:-${BALLISTICA_MODS:-$HOME/.ballisticakit/mods}}"
 BRAIN_SRC="${WALKTRAIN_BRAIN:-$ROOT/output/spaz_walk.brain}"
+PLUGIN_SRC="$ROOT/walktrain/walktrain_brain.py"
 
 mkdir -p "$MODS/brains"
 
-# Package (plugin lives at walktrain.plugin.WalkTrainBrainPlugin).
-# Only ship playback pieces into mods — not headless trainer boot/run helpers.
-rm -rf "$MODS/walktrain"
-mkdir -p "$MODS/walktrain"
-for f in __init__.py brain.py player.py plugin.py; do
-  cp -a "$ROOT/walktrain/$f" "$MODS/walktrain/"
-done
+# Remove the old multi-file package install if present (avoids shadowing /
+# duplicate plugin entries).
+if [[ -d "$MODS/walktrain" ]]; then
+  rm -rf "$MODS/walktrain"
+  echo "Removed old package install → $MODS/walktrain"
+fi
+
+cp -f "$PLUGIN_SRC" "$MODS/walktrain_brain.py"
+echo "Installed plugin → $MODS/walktrain_brain.py"
 
 if [[ -f "$BRAIN_SRC" ]]; then
-  # Ensure metadata is present before copying.
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -m walktrain.stamp_meta "$BRAIN_SRC" || true
   cp -f "$BRAIN_SRC" "$MODS/brains/spaz_walk.brain"
@@ -26,6 +28,5 @@ else
   echo "WARNING: no brain at $BRAIN_SRC — train first or copy one to $MODS/brains/"
 fi
 
-echo "Installed plugin package → $MODS/walktrain"
-echo "Enable: Settings → Plugins → walktrain.plugin.WalkTrainBrainPlugin"
+echo "Enable: Settings → Plugins → walktrain_brain.WalkTrainBrainPlugin"
 echo "Play: host a game on The Pad, then chat /brainbot"

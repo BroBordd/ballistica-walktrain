@@ -46,12 +46,11 @@ Parallel mode runs several `ballisticakit_headless` processes (CPU ODE — not a
 ## Package layout
 
 ```
-walktrain/brain.py      # MLP + Adam + .brain I/O (pure Python)
-walktrain/activity.py   # Session/Activity, Spaz, rewards
-walktrain/boot.py       # --exec entrypoint
-walktrain/plugin.py     # BombSquad 1.8 / API 9 playback plugin
-walktrain/player.py     # In-game brain-driven Spaz
-walktrain/run.sh        # Launch helper
+walktrain/brain.py              # MLP + Adam + .brain I/O (pure Python)
+walktrain/activity.py           # Session/Activity, Spaz, rewards
+walktrain/boot.py               # --exec entrypoint
+walktrain/walktrain_brain.py    # Standalone BombSquad API 9 playback plugin
+walktrain/run.sh                # Launch helper
 ```
 
 ## Play a brain in BombSquad 1.8 (API 9)
@@ -60,12 +59,12 @@ walktrain/run.sh        # Launch helper
 The plugin refuses to spawn if the live map does not match.
 
 ```bash
-# Install package + brain into BallisticaKit mods
+# Install one plugin file + brain into BallisticaKit mods
 ./walktrain/install_plugin.sh          # default: ~/.ballisticakit/mods
 # or: ./walktrain/install_plugin.sh /path/to/BombSquad/mods
 ```
 
-1. Enable **walktrain.plugin.WalkTrainBrainPlugin** under Settings → Plugins (restart if needed).
+1. Enable **walktrain_brain.WalkTrainBrainPlugin** under Settings → Plugins (restart if needed).
 2. Host a game on **The Pad** (the map in the brain’s `meta.map_name`).
 3. Chat **`/brainbot`** to spawn a bot that runs the trained policy.
 4. **`/brainbot stop`** removes it; **`/brainbot info`** shows brain vs current map.
