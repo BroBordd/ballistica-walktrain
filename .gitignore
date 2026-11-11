@@ -1,7 +1,10 @@
 # Brain checkpoints (large / regenerable) — keep directory, ignore weights
 output/*.brain
 output/*.brain.tmp.*
+output/*.brain.lock
+output/logs/
 *.brain
+*.brain.lock
 
 # Python
 __pycache__/

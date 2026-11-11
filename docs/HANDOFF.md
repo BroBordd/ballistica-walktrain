@@ -32,7 +32,9 @@ Repo owner: **BroBordd** on GitHub. Project: this repository.
 
 **Initial prompt scope:** infrastructure is complete. Remaining work is **training quality** (and optional polish in `NEXT_STEPS.md`), not missing plumbing.
 
-**Next agent priority:** keep training on `output/spaz_walk.brain`; if fall rate stays flat past ~500–1000 eps, try lower LR, longer inland episodes, or stronger center-seeking reward; optional eval mode / jump. Stale duplicate tree at `ballistica/walktrain/` differs from canonical `ballistica-walktrain/` — sync or delete when convenient.
+**Parallel fast training:** `./walktrain/run_parallel.sh` launches N headless processes (`WALKTRAIN_WORKERS`, default nproc) sharing one flocked `.brain` (Hogwild pull/push). Default speed exponent **8** (256× wall clock). Not GPU/Isaac — Ballistica ODE is CPU; parallelism = more processes + `BA_UDP_PORT=0`.
+
+**Next agent priority:** keep parallel training on `output/spaz_walk.brain`; if fall rate stays flat past ~500–1000 eps, try lower LR, longer inland episodes, or stronger center-seeking reward; optional eval mode / jump. Stale duplicate tree at `ballistica/walktrain/` differs from canonical `ballistica-walktrain/` — sync or delete when convenient.
 
 ## How to run
 

@@ -81,6 +81,8 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
         self.brain_path: str = settings.get('brain_path', _DEFAULT_BRAIN)
         self.save_every: int = int(settings.get('save_every', 5))
         self.log_every: int = int(settings.get('log_every', 1))
+        self.worker_id: int = int(settings.get('worker_id', 0))
+        self.shared_brain: bool = bool(settings.get('shared_brain', True))
         self.brain = Brain.load_or_create(
             self.brain_path,
             hyper=HyperParams(
@@ -91,12 +93,17 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
             ),
         )
         # Env/boot settings win over checkpoint hyper for wall-clock knobs.
-        if 'speed_exponent' in settings:
-            self.brain.hyper.speed_exponent = int(settings['speed_exponent'])
-        if 'max_episode_seconds' in settings:
-            self.brain.hyper.max_episode_seconds = float(
-                settings['max_episode_seconds']
-            )
+        self._speed_override = (
+            int(settings['speed_exponent'])
+            if 'speed_exponent' in settings
+            else None
+        )
+        self._max_ep_override = (
+            float(settings['max_episode_seconds'])
+            if 'max_episode_seconds' in settings
+            else None
+        )
+        self._apply_runtime_overrides()
         self._trainee: TraineeSpaz | None = None
         self._timer: bs.Timer | None = None
         self._save_timer: bs.Timer | None = None
@@ -113,6 +120,7 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
         self._spawn_y = _PAD_CENTER[1]
         self._episodes_since_save = 0
         self._started_wall = time.time()
+        self._local_episodes = 0
 
     @override
     def on_transition_in(self) -> None:
@@ -147,8 +155,9 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
 
         # print() reaches headless stdout; stdlib logging often does not.
         print(
-            f'WalkTrain: brain={self.brain_path} episodes={self.brain.episodes}'
-            f' steps={self.brain.steps} speed=2^{hyp.speed_exponent}',
+            f'WalkTrain w{self.worker_id}: brain={self.brain_path}'
+            f' episodes={self.brain.episodes} steps={self.brain.steps}'
+            f' speed=2^{hyp.speed_exponent} shared={self.shared_brain}',
             flush=True,
         )
         self._start_episode()
@@ -202,7 +211,25 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
 
         return TraineeSpaz(spaz, _on_fell)
 
+    def _apply_runtime_overrides(self) -> None:
+        if self._speed_override is not None:
+            self.brain.hyper.speed_exponent = self._speed_override
+        if self._max_ep_override is not None:
+            self.brain.hyper.max_episode_seconds = self._max_ep_override
+
     def _start_episode(self) -> None:
+        # Flush local updates before adopting peer weights, otherwise a
+        # pull would discard uncommitted REINFORCE steps.
+        if self.shared_brain and self.brain._pending_episodes > 0:
+            self._save_brain()
+            self._episodes_since_save = 0
+        if self.shared_brain:
+            try:
+                if self.brain.pull_shared(self.brain_path):
+                    self._apply_runtime_overrides()
+            except Exception:
+                logging.exception('shared brain pull failed')
+
         # Drop previous actor.
         if self._trainee is not None:
             try:
@@ -353,6 +380,7 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
             self.brain.best_survival = survival
 
         self._episodes_since_save += 1
+        self._local_episodes += 1
         if self.brain.episodes % self.log_every == 0:
             wall = time.time() - self._started_wall
             end = self._last_pos or self._spawn_pos or (0.0, 0.0, 0.0)
@@ -361,7 +389,8 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
                 (end[0] - spawn[0]) ** 2 + (end[2] - spawn[2]) ** 2
             )
             print(
-                f'ep={self.brain.episodes} ret={ep_return:.2f}'
+                f'w{self.worker_id} ep={self.brain.episodes}'
+                f' local={self._local_episodes} ret={ep_return:.2f}'
                 f' survive={survival:.1f}s fell={fell}'
                 f' dist={self._dist_moved:.1f} drift={drift:.1f}'
                 f' best={self.brain.best_survival:.1f}s'
@@ -377,9 +406,12 @@ class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
 
     def _save_brain(self) -> None:
         try:
-            self.brain.save(self.brain_path)
+            if self.shared_brain:
+                self.brain.save_shared(self.brain_path)
+            else:
+                self.brain.save(self.brain_path)
             print(
-                f'Saved brain → {self.brain_path}'
+                f'w{self.worker_id} Saved brain → {self.brain_path}'
                 f' (episodes={self.brain.episodes})',
                 flush=True,
             )

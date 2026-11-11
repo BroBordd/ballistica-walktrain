@@ -36,6 +36,7 @@ def start(
     from walktrain.activity import WalkTrainSession, _DEFAULT_BRAIN
 
     path = brain_path or os.environ.get('WALKTRAIN_BRAIN', _DEFAULT_BRAIN)
+    shared_env = os.environ.get('WALKTRAIN_SHARED', '1').strip().lower()
     settings = {
         'brain_path': path,
         'speed_exponent': int(
@@ -45,6 +46,8 @@ def start(
         'max_episode_seconds': float(
             os.environ.get('WALKTRAIN_MAX_EP', max_episode_seconds)
         ),
+        'worker_id': int(os.environ.get('WALKTRAIN_WORKER_ID', '0')),
+        'shared_brain': shared_env not in ('0', 'false', 'no', 'off'),
     }
     print(f'WalkTrain boot → {settings}', flush=True)
 

@@ -49,7 +49,7 @@ Expect early fall rate high but not 100%; survival should trend up if REINFORCE 
 - [ ] Add jump bit to action space (bump `BRAIN_VERSION`) — railings-off makes jump optional
 - [ ] `ba_meta` Plugin export so training can enable without `--exec`
 - [ ] Unit tests for near-edge heuristic / action decode (brain save/load already smoke-tested)
-- [ ] Shared-file locking if multiple headless trainers write one brain
+- [x] Shared-file locking + multi-worker Hogwild (`run_parallel.sh`, `save_shared`/`pull_shared`)
 - [ ] Sync `ballistica/walktrain/` copy or delete it — canonical tree is `ballistica-walktrain/`
 
 ## 4. Out of scope unless user asks

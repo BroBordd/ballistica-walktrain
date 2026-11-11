@@ -8,14 +8,16 @@ copy, and resume training from.
 
 from __future__ import annotations
 
+import fcntl
 import gzip
 import json
 import math
 import os
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 BRAIN_VERSION = 1
@@ -118,6 +120,10 @@ class Brain:
         self.best_survival = 0.0
         self.total_reward = 0.0
         self.created_at = time.time()
+        self._loaded_mtime = 0.0
+        # Episodes/steps learned since last successful shared save (for merge).
+        self._pending_episodes = 0
+        self._pending_steps = 0
         self.updated_at = self.created_at
         self.seed = seed if seed is not None else random.randrange(1 << 31)
         self.rng = random.Random(self.seed)
@@ -273,6 +279,8 @@ class Brain:
 
         self.episodes += 1
         self.steps += n
+        self._pending_episodes += 1
+        self._pending_steps += n
         self.total_reward += returns[0]
         self.updated_at = time.time()
         return returns[0]
@@ -388,15 +396,118 @@ class Brain:
         with gzip.open(tmp, 'wt', encoding='utf-8') as f:
             f.write(payload)
         os.replace(tmp, path)
+        try:
+            self._loaded_mtime = os.path.getmtime(path)
+        except OSError:
+            pass
+
+    def save_shared(self, path: str) -> None:
+        """Exclusive-lock then atomic save (multi-worker safe).
+
+        Counters are merged as disk_total + this worker's pending updates so
+        parallel Hogwild writers don't under-count experience.
+        """
+        with _brain_lock(path, exclusive=True):
+            pending_ep = self._pending_episodes
+            pending_st = self._pending_steps
+            if path and os.path.isfile(path):
+                try:
+                    with gzip.open(path, 'rt', encoding='utf-8') as f:
+                        disk = json.load(f)
+                    self.episodes = int(disk.get('episodes', 0)) + pending_ep
+                    self.steps = int(disk.get('steps', 0)) + pending_st
+                    self.best_survival = max(
+                        self.best_survival,
+                        float(disk.get('best_survival', 0.0)),
+                    )
+                    self.total_reward = max(
+                        self.total_reward,
+                        float(disk.get('total_reward', 0.0)),
+                    )
+                    disk_t = int(disk.get('adam_t', 0))
+                    if disk_t > self._t:
+                        self._t = disk_t
+                except Exception:
+                    self.episodes = max(self.episodes, pending_ep)
+            self.save(path)
+            self._pending_episodes = 0
+            self._pending_steps = 0
+
+    def pull_shared(self, path: str) -> bool:
+        """If a peer wrote a newer checkpoint, adopt its weights.
+
+        Hogwild-style: take the latest file under a shared lock. Pending
+        local episode/step deltas are preserved and applied on next save.
+        """
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+        if mtime <= self._loaded_mtime:
+            return False
+        with _brain_lock(path, exclusive=False):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                return False
+            if mtime <= self._loaded_mtime:
+                return False
+            other = Brain.load(path)
+        self._adopt_peer(other, mtime)
+        return True
+
+    def _adopt_peer(self, other: Brain, mtime: float) -> None:
+        # Keep pending_* — those updates are not on disk yet.
+        pending_ep = self._pending_episodes
+        pending_st = self._pending_steps
+        self.W1, self.b1 = other.W1, other.b1
+        self.W2, self.b2 = other.W2, other.b2
+        self.Wv, self.bv = other.Wv, other.bv
+        self._m = other._m
+        self._v = other._v
+        self._t = max(self._t, other._t)
+        self.episodes = other.episodes + pending_ep
+        self.steps = other.steps + pending_st
+        self.best_survival = max(self.best_survival, other.best_survival)
+        self.total_reward = max(self.total_reward, other.total_reward)
+        self.hyper = other.hyper
+        self._loaded_mtime = mtime
+        self._pending_episodes = pending_ep
+        self._pending_steps = pending_st
 
     @classmethod
     def load(cls, path: str) -> Brain:
         with gzip.open(path, 'rt', encoding='utf-8') as f:
             data = json.load(f)
-        return cls.from_dict(data)
+        brain = cls.from_dict(data)
+        try:
+            brain._loaded_mtime = os.path.getmtime(path)
+        except OSError:
+            brain._loaded_mtime = time.time()
+        return brain
 
     @classmethod
     def load_or_create(cls, path: str, **kwargs: Any) -> Brain:
         if path and os.path.isfile(path):
             return cls.load(path)
         return cls(**kwargs)
+
+
+@contextmanager
+def _brain_lock(path: str, *, exclusive: bool) -> Iterator[None]:
+    """Advisory lock beside the brain file (fcntl; works across processes)."""
+    lock_path = f'{path}.lock'
+    directory = os.path.dirname(os.path.abspath(lock_path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)

@@ -21,19 +21,26 @@ Headless training against real Ballistica physics is **working**: episodes log, 
 git clone --depth 1 https://github.com/efroemling/ballistica.git
 cd ballistica && make prefab-server-debug-build   # needs uv + clang-format; see docs/NEXT_STEPS.md
 
-# 2) Trainer
+# 2) Trainer — single worker
 cd ../ballistica-walktrain
 export BALLISTICA_ROOT=../ballistica
 ./walktrain/run.sh
+
+# Or: parallel workers (recommended) — N headless sims, one shared .brain
+./walktrain/run_parallel.sh
 ```
 
 Checkpoint default: `output/spaz_walk.brain`. Rerun the same command to **resume**.
 
+Parallel mode runs several `ballisticakit_headless` processes (CPU ODE — not a GPU Isaac Gym clone) that Hogwild-update one locked `.brain`, at high debug speed (`2^WALKTRAIN_SPEED`).
+
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `WALKTRAIN_BRAIN` | `output/spaz_walk.brain` | Checkpoint path |
-| `WALKTRAIN_SPEED` | `3` | Wall-clock `2**n` via debug speed exponent |
-| `WALKTRAIN_SAVE_EVERY` | `5` | Episodes between saves |
+| `WALKTRAIN_SPEED` | `3` single / `8` parallel | Wall-clock `2**n` via debug speed exponent |
+| `WALKTRAIN_WORKERS` | `nproc` (max 8) | Parallel headless processes (`run_parallel.sh`) |
+| `WALKTRAIN_SAVE_EVERY` | `5` / `2` parallel | Episodes between saves |
+| `WALKTRAIN_SHARED` | `1` | Locked shared-brain pull/push between workers |
 | `BALLISTICA_ROOT` | `../ballistica` | Engine checkout for `run.sh` |
 
 ## Package layout
