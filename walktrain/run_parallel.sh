@@ -3,8 +3,9 @@
 # (Isaac-Gym-style parallelism via processes — ODE is CPU, not GPU).
 #
 # Usage:
-#   export BALLISTICA_ROOT=../ballistica
-#   ./walktrain/run_parallel.sh
+#   ./walktrain/run_parallel.sh /path/to/ballistica
+#   ./walktrain/run_parallel.sh ../ballistica
+#   BALLISTICA_ROOT=../ballistica ./walktrain/run_parallel.sh   # env fallback
 #
 # Env:
 #   WALKTRAIN_WORKERS   default: nproc (capped at 8)
@@ -16,17 +17,22 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
+PYTHON_ROOT="$REPO_ROOT"
 
-if [[ -f "$REPO_ROOT/Makefile" && -d "$REPO_ROOT/src/ballistica" ]]; then
-  BALLISTICA_ROOT="${BALLISTICA_ROOT:-$REPO_ROOT}"
-  PYTHON_ROOT="$REPO_ROOT"
+# First arg wins; else BALLISTICA_ROOT; else nested engine / sibling default.
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+  BALLISTICA_ROOT="$1"
+  shift
+elif [[ -n "${BALLISTICA_ROOT:-}" ]]; then
+  :
+elif [[ -f "$REPO_ROOT/Makefile" && -d "$REPO_ROOT/src/ballistica" ]]; then
+  BALLISTICA_ROOT="$REPO_ROOT"
 else
-  BALLISTICA_ROOT="${BALLISTICA_ROOT:-$REPO_ROOT/../ballistica}"
-  PYTHON_ROOT="$REPO_ROOT"
+  BALLISTICA_ROOT="$REPO_ROOT/../ballistica"
 fi
 
 BALLISTICA_ROOT="$(cd "$BALLISTICA_ROOT" 2>/dev/null && pwd)" || {
-  echo "BALLISTICA_ROOT not found" >&2
+  echo "ballistica folder not found (pass path as first arg or set BALLISTICA_ROOT)" >&2
   exit 1
 }
 
