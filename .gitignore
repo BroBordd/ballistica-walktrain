@@ -1,0 +1,23 @@
+# Brain checkpoints (large / regenerable) — keep directory, ignore weights
+output/*.brain
+output/*.brain.tmp.*
+*.brain
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv*/
+
+# Ballistica build trees if someone clones engine beside this repo
+ballistica/build/
+ballistica/.cache/
+ballistica/.venv/
+
+# Secrets / local
+.env
+.env.*
+*.pem
+*credentials*
+.DS_Store
