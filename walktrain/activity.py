@@ -19,11 +19,18 @@ if TYPE_CHECKING:
 
 # Map center-ish for The Pad (from mapdata flag_default / bounds).
 _PAD_CENTER = (0.46, 4.38, -3.0)
+# Horizontal radius past which we treat the Spaz as near the rim.
+# Spawns sit ~7.3 from center; railings sit around that ring.
+_NEAR_EDGE_RADIUS = 5.8
+# If Y drops this far below spawn, treat as a fall even before OOB.
+_FALL_Y_DROP = 3.5
 _POS_SCALE = 0.12
 _VEL_SCALE = 0.08
 
 _DEFAULT_BRAIN = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'output', 'spaz_walk.brain'
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'output',
+    'spaz_walk.brain',
 )
 
 # new_host_session() requires a Session *type*, so boot.py stuffs
@@ -65,7 +72,7 @@ class TraineeSpaz:
             return False
 
 
-class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
+class WalkTrainActivity(bs.Activity[bs.Player, bs.Team]):
     """Spawn a Spaz on The Pad; train a brain to walk without falling."""
 
     def __init__(self, settings: dict):
@@ -83,11 +90,20 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
                 ),
             ),
         )
+        # Env/boot settings win over checkpoint hyper for wall-clock knobs.
+        if 'speed_exponent' in settings:
+            self.brain.hyper.speed_exponent = int(settings['speed_exponent'])
+        if 'max_episode_seconds' in settings:
+            self.brain.hyper.max_episode_seconds = float(
+                settings['max_episode_seconds']
+            )
         self._trainee: TraineeSpaz | None = None
         self._timer: bs.Timer | None = None
         self._save_timer: bs.Timer | None = None
         self._episode_t0 = 0.0
         self._last_pos: tuple[float, float, float] | None = None
+        self._spawn_pos: tuple[float, float, float] | None = None
+        self._dist_moved = 0.0
         self._obs: list[list[float]] = []
         self._actions: list[int] = []
         self._rewards: list[float] = []
@@ -105,6 +121,16 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
 
         ThePad.preload()
         self.map = ThePad()
+        # Stock The Pad has bumper railings that bounce a walking Spaz
+        # back onto the floor — without removing them, "don't fall" is
+        # nearly free and the policy never sees OutOfBoundsMessage.
+        railing = getattr(self.map, 'railing', None)
+        if railing is not None:
+            try:
+                railing.delete()
+            except Exception:
+                pass
+            self.map.railing = None  # type: ignore[attr-defined]
         # Quiet camera / lighting defaults; headless ignores draw.
         g = self.globalsnode
         g.tint = (1.1, 1.05, 1.0)
@@ -119,12 +145,11 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
         except Exception as exc:
             logging.warning('Could not set debug speed: %s', exc)
 
-        logging.info(
-            'WalkTrain: brain=%s episodes=%d steps=%d speed=2^%d',
-            self.brain_path,
-            self.brain.episodes,
-            self.brain.steps,
-            hyp.speed_exponent,
+        # print() reaches headless stdout; stdlib logging often does not.
+        print(
+            f'WalkTrain: brain={self.brain_path} episodes={self.brain.episodes}'
+            f' steps={self.brain.steps} speed=2^{hyp.speed_exponent}',
+            flush=True,
         )
         self._start_episode()
         self._timer = bs.Timer(hyp.tick_interval, self._tick, repeat=True)
@@ -135,11 +160,29 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
 
     def _spawn_point(self) -> tuple[float, float, float]:
         assert self.map is not None
+        # Mix safe interior starts with rim-adjacent starts so the
+        # policy both explores and must learn not to walk off.
+        rng = self.brain.rng
         pts = self.map.ffa_spawn_points
-        # Cycle spawns so the policy sees different edges.
-        idx = self.brain.episodes % max(len(pts), 1)
-        p = pts[idx]
-        return (float(p[0]), float(p[1]), float(p[2]))
+        y = float(pts[0][1]) if pts else _PAD_CENTER[1]
+
+        # Every 3rd episode: real FFA rim spawn (hard).
+        if self.brain.episodes % 3 == 2 and pts:
+            p = pts[self.brain.episodes % len(pts)]
+            return (float(p[0]), float(p[1]), float(p[2]))
+
+        # Otherwise: annulus whose outer radius grows with training.
+        # Early: mostly inland. Later: spawn already near the lip.
+        outer = min(2.5 + 0.06 * self.brain.episodes, 6.8)
+        inner = max(0.0, outer - 2.5)
+        ang = rng.random() * 6.283185307179586
+        # Uniform in annulus area.
+        rad = math.sqrt(
+            rng.random() * (outer * outer - inner * inner) + inner * inner
+        )
+        x = _PAD_CENTER[0] + rad * math.cos(ang)
+        z = _PAD_CENTER[2] + rad * math.sin(ang)
+        return (x, y, z)
 
     def _make_spaz(self, pos: Sequence[float]) -> TraineeSpaz:
         from bascenev1lib.actor.spaz import Spaz
@@ -172,9 +215,11 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
 
         pos = self._spawn_point()
         self._spawn_y = pos[1]
+        self._spawn_pos = (pos[0], pos[1], pos[2])
         self._trainee = self._make_spaz(pos)
         self._episode_t0 = bs.time()
-        self._last_pos = (pos[0], pos[1], pos[2])
+        self._last_pos = self._spawn_pos
+        self._dist_moved = 0.0
         self._obs = []
         self._actions = []
         self._rewards = []
@@ -199,12 +244,10 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
             vel[2] * _VEL_SCALE,
         )
         height = (pos[1] - self._spawn_y) * _POS_SCALE
-        near = (
-            1.0
-            if self.map.is_point_near_edge(bs.Vec3(pos[0], pos[1], pos[2]), True)
-            else 0.0
-        )
+        # ThePad does not override Map.is_point_near_edge (always False).
+        # Use a pad-radius heuristic so edge_penalty / obs are meaningful.
         dist = math.sqrt(dx * dx + dz * dz)
+        near = 1.0 if (dist / _POS_SCALE) > _NEAR_EDGE_RADIUS else 0.0
         speed = math.sqrt(vx * vx + vz * vz)
         et = bs.time() - self._episode_t0
         obs = [
@@ -228,7 +271,11 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
         assert self._trainee is not None
         mx, my, run = Brain.decode_action(action)
         spaz = self._trainee.spaz
-        spaz.on_move(mx, my)
+        # Prefer attribute setters: Spaz.on_move() sends node message
+        # 'move', which current SpazNode C++ does not handle (Invalid
+        # node-message type). Stock SpazBot still uses these APIs.
+        spaz.on_move_left_right(mx)
+        spaz.on_move_up_down(my)
         spaz.on_run(run)
 
     def _tick(self) -> None:
@@ -257,12 +304,16 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
         node = self._trainee.spaz.node
         pos = node.position if node else self._last_pos
         assert pos is not None
+        # Backup fall detection: long drop before map-bounds OOB fires.
+        if pos[1] < self._spawn_y - _FALL_Y_DROP:
+            self._episode_fell = True
         moved = 0.0
         if self._last_pos is not None:
             moved = math.sqrt(
                 (pos[0] - self._last_pos[0]) ** 2
                 + (pos[2] - self._last_pos[2]) ** 2
             )
+        self._dist_moved += moved
         self._last_pos = (pos[0], pos[1], pos[2])
 
         near = obs[7]
@@ -304,16 +355,18 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
         self._episodes_since_save += 1
         if self.brain.episodes % self.log_every == 0:
             wall = time.time() - self._started_wall
-            logging.info(
-                'ep=%d ret=%.2f survive=%.1fs fell=%s best=%.1fs'
-                ' steps=%d wall=%.0fs',
-                self.brain.episodes,
-                ep_return,
-                survival,
-                fell,
-                self.brain.best_survival,
-                self.brain.steps,
-                wall,
+            end = self._last_pos or self._spawn_pos or (0.0, 0.0, 0.0)
+            spawn = self._spawn_pos or end
+            drift = math.sqrt(
+                (end[0] - spawn[0]) ** 2 + (end[2] - spawn[2]) ** 2
+            )
+            print(
+                f'ep={self.brain.episodes} ret={ep_return:.2f}'
+                f' survive={survival:.1f}s fell={fell}'
+                f' dist={self._dist_moved:.1f} drift={drift:.1f}'
+                f' best={self.brain.best_survival:.1f}s'
+                f' steps={self.brain.steps} wall={wall:.0f}s',
+                flush=True,
             )
 
         if self._episodes_since_save >= self.save_every:
@@ -325,10 +378,10 @@ class WalkTrainActivity(bs.Activity['bs.Player', 'bs.Team']):
     def _save_brain(self) -> None:
         try:
             self.brain.save(self.brain_path)
-            logging.info(
-                'Saved brain → %s (episodes=%d)',
-                self.brain_path,
-                self.brain.episodes,
+            print(
+                f'Saved brain → {self.brain_path}'
+                f' (episodes={self.brain.episodes})',
+                flush=True,
             )
         except Exception:
             logging.exception('Failed to save brain')

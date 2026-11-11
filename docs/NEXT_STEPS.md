@@ -2,86 +2,58 @@
 
 Work top-down. Check off as you go.
 
-## 1. Workspace setup
+## Done
 
-1. Clone this repo.
-2. Clone Ballistica engine (sibling directory recommended):
+- [x] Clone Ballistica + fetch `prefab-server-debug-build` headless binary
+- [x] Adapt `run.sh` for standalone repo + `BALLISTICA_ROOT` + libpython/PYTHONHOME
+- [x] Fix movement (`on_move_left_right` / `on_move_up_down`)
+- [x] Remove The Pad bumper railing so falls are possible
+- [x] Pad-radius near-edge obs (ThePad has no `is_point_near_edge`)
+- [x] Center spawn + expanding jitter (FFA rim spawns too harsh)
+- [x] Verify episode logs + `.brain` save/resume
+- [x] Capture sample log lines in `docs/HANDOFF.md`
 
-   ```bash
-   git clone --depth 1 https://github.com/efroemling/ballistica.git
-   ```
-
-3. In the ballistica tree, bootstrap and fetch headless prefab:
-
-   ```bash
-   # needs: curl, make, cmake-ish toolchain optional for prefab
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   # apt: clang-format (checkenv requires it)
-   sudo apt-get install -y clang-format
-   export PATH="$HOME/.local/bin:$PATH"
-   cd ballistica && make prefab-server-debug-build
-   ```
-
-4. Confirm binary exists, e.g.:
-
-   `ballistica/build/prefab/full/linux_x86_64_server/debug/dist/ballisticakit_headless`
-
-## 2. First training smoke test
-
-From **this** repo root:
+## 1. Keep training / measure learning
 
 ```bash
-mkdir -p output
-export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
-export WALKTRAIN_BRAIN="$PWD/output/spaz_walk.brain"
-export WALKTRAIN_SPEED=3
-export WALKTRAIN_SAVE_EVERY=2
-
-BIN=../ballistica/build/prefab/full/linux_x86_64_server/debug/dist/ballisticakit_headless
-# adjust BIN if layout differs
-STAGED="$(cd "$(dirname "$BIN")/.." && pwd)"  # often …/debug or …/staged
-cd "$(dirname "$BIN")/.."   # directory that contains dist/ + ba_data if staged that way
-# Prefer running with cwd = staged root that contains ba_data:
-# Inspect: ls "$(dirname "$BIN")/../ba_data" or "$(dirname "$BIN")/ba_data"
-
-"$BIN" --exec 'import walktrain.boot; walktrain.boot.main()'
+cd ballistica-walktrain
+export BALLISTICA_ROOT=../ballistica
+export WALKTRAIN_SPEED=5
+export WALKTRAIN_MAX_EP=25
+export WALKTRAIN_SAVE_EVERY=5
+./walktrain/run.sh
 ```
 
-**Also fix `walktrain/run.sh`** so it works when the package lives in this standalone repo (today it assumes `walktrain/` is inside the ballistica tree with `ROOT=parent`). Update path discovery:
+After ≥100–200 episodes, plot or summarize:
 
-- `REPO_ROOT` = parent of `walktrain/`
-- `BALLISTICA_ROOT` = env `BALLISTICA_ROOT` or `../ballistica`
-- Put `REPO_ROOT` on `PYTHONPATH`
-- Find binary under `$BALLISTICA_ROOT/build/prefab/...`
+- fall rate in rolling windows of 20
+- mean survival time
+- `best_survival` in the brain file
 
-## 3. Likely failures and fixes
+Expect early fall rate high but not 100%; survival should trend up if REINFORCE is learning.
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `ModuleNotFoundError: walktrain` | PYTHONPATH | Export repo root on PYTHONPATH before `--exec` |
-| Missing mesh / asset / construct errors loading The Pad | headless-minimal assets incomplete for maps | May need fuller server asset stage (`assets-server` / non-minimal profile) or GUI-less but full scene assets — inspect Ballistica staging docs |
-| Session never starts | `apptimer(2.5)` too early/late; classic mode not up | Increase delay; ensure classic app mode active on headless server |
-| `new_host_session` type error | Passed instance/lambda | Must pass `WalkTrainSession` class; settings via `SESSION_SETTINGS` |
-| Spaz falls through floor | Collision mesh missing in headless bundle | Same as asset issue — verify collision meshes resolve |
-| No brain file | Crash before save; wrong cwd permissions | Check logs; ensure `output/` writable; `save_every` |
+## 2. Likely tuning knobs (`walktrain/brain.py` `HyperParams`)
 
-## 4. After smoke test works
+| Symptom | Try |
+|---------|-----|
+| Always charges off edge | ↑ `edge_penalty`, ↓ `move_reward`, ↑ `survive_reward` |
+| Never explores / stands still | ↑ `move_reward`, ↑ `entropy_bonus` |
+| Unstable late collapse | ↓ `learning_rate`, ↑ episode length slowly |
+| Falls only after long walks | already good — lengthen `max_episode_seconds` |
 
-1. Run ≥50 episodes; confirm `episodes` in checkpoint increments across restarts.
-2. Tune `HyperParams` if agent always charges off the edge (increase `edge_penalty`, reduce `move_reward`, add jump later).
-3. Optional: multiple parallel headless processes with different brain paths or shared file locking (not implemented).
-4. Optional: eval mode (greedy argmax, no learn) for measuring survival.
+**Important:** hyperparams are stored inside the `.brain`. Changing defaults in code only affects *new* brains unless you override after `load_or_create` (speed / max_ep already overridden from env).
 
-## 5. Code polish left undone
+## 3. Optional improvements
 
-- [ ] Adapt `run.sh` for standalone repo + `BALLISTICA_ROOT`
-- [ ] Verify The Pad collision under current `headless-minimal` prefab
-- [ ] Add `docs` note once first successful log line is captured (paste sample)
-- [ ] Consider `ba_meta` Plugin export for enabling without `--exec`
-- [ ] Unit tests beyond brain save/load (brain already smoke-tested outside engine)
+- [ ] Eval mode: greedy argmax, no `learn_episode`, report survival stats
+- [ ] Add jump bit to action space (bump `BRAIN_VERSION`) — railings-off makes jump optional
+- [ ] `ba_meta` Plugin export so training can enable without `--exec`
+- [ ] Unit tests for near-edge heuristic / action decode (brain save/load already smoke-tested)
+- [ ] Shared-file locking if multiple headless trainers write one brain
+- [ ] Sync `ballistica/walktrain/` copy or delete it — canonical tree is `ballistica-walktrain/`
 
-## 6. Out of scope unless user asks
+## 4. Out of scope unless user asks
 
-- Pushing proprietary Ballistica assets into this GitHub repo
+- Redistributing Ballistica proprietary assets into this GitHub repo
 - Torch/GPU trainers
-- Non–The-Pad maps (easy later: swap map class in `on_transition_in`)
+- Non–The-Pad maps (swap map class in `on_transition_in`; re-tune center/radius)

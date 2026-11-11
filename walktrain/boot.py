@@ -46,13 +46,14 @@ def start(
             os.environ.get('WALKTRAIN_MAX_EP', max_episode_seconds)
         ),
     }
-    logging.info('WalkTrain boot → %s', settings)
+    print(f'WalkTrain boot → {settings}', flush=True)
 
     def _go() -> None:
         # new_host_session wants a Session subclass, not an instance.
         from walktrain import activity as actmod
 
         actmod.SESSION_SETTINGS = settings
+        print('WalkTrain: launching WalkTrainSession', flush=True)
         bs.new_host_session(WalkTrainSession)
 
     # Wait for classic mode / main menu to come up, then hijack the session.

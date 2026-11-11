@@ -22,29 +22,17 @@ checkpoint.
 
 ## Quick start
 
-```bash
-cd /path/to/ballistica
-./walktrain/run.sh
-```
-
-First run may download/build a prefab headless server. Resume later:
+From the **standalone** `ballistica-walktrain` repo (engine as sibling):
 
 ```bash
-./walktrain/run.sh   # reloads walktrain/output/spaz_walk.brain
+export BALLISTICA_ROOT=../ballistica
+./walktrain/run.sh   # creates/resumes output/spaz_walk.brain
 ```
 
 Custom checkpoint / faster wall-clock:
 
 ```bash
-WALKTRAIN_BRAIN=/tmp/pad.brain WALKTRAIN_SPEED=4 ./walktrain/run.sh
-```
-
-Or point a staged binary yourself:
-
-```bash
-PYTHONPATH=. \
-  ./build/…/staged/dist/ballisticakit_headless \
-  --exec 'import walktrain.boot; walktrain.boot.main()'
+WALKTRAIN_BRAIN=/tmp/pad.brain WALKTRAIN_SPEED=5 ./walktrain/run.sh
 ```
 
 ## What the brain learns

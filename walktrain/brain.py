@@ -56,10 +56,10 @@ class HyperParams:
     learning_rate: float = 0.001
     gamma: float = 0.99
     entropy_bonus: float = 0.02
-    fall_penalty: float = 25.0
-    survive_reward: float = 0.05
-    move_reward: float = 0.15
-    edge_penalty: float = 0.08
+    fall_penalty: float = 40.0
+    survive_reward: float = 0.12
+    move_reward: float = 0.04
+    edge_penalty: float = 0.25
     max_episode_seconds: float = 30.0
     tick_interval: float = 0.05
     speed_exponent: int = 3  # 2**n realtime (sim still identical)

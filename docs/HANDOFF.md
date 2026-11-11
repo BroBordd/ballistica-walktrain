@@ -14,87 +14,88 @@ Build a **headless minimal program** that:
 
 Repo owner: **BroBordd** on GitHub. Project: this repository.
 
-## Current status (as of handoff)
+## Current status (as of this handoff)
 
 | Item | Status |
 |------|--------|
 | Pure-Python MLP brain + gzip JSON checkpoints | **Done** (`walktrain/brain.py`) |
 | Session/Activity: Spaz on The Pad + RL tick loop | **Done** (`walktrain/activity.py`) |
-| `--exec` boot + `run.sh` | **Done** (`walktrain/boot.py`, `walktrain/run.sh`) |
-| Prefab headless binary downloaded in original workspace | **Partial** — was at `ballistica/build/prefab/full/linux_x86_64_server/debug/dist/ballisticakit_headless` after `make prefab-server-debug-build` |
-| End-to-end training run verified (episodes logging + brain save in-engine) | **NOT DONE** — paused before first live training run |
-| Docs / GitHub repo | **This handoff** |
+| `--exec` boot + `run.sh` (standalone + `BALLISTICA_ROOT`) | **Done** |
+| Prefab headless binary | **Done** — `ballistica/build/prefab/full/linux_x86_64_server/debug/dist/ballisticakit_headless` |
+| libpython / PYTHONHOME bootstrap in `run.sh` | **Done** (conda shared `libpython3.14`) |
+| Movement API | **Done** — use `on_move_left_right` / `on_move_up_down` (not `on_move`) |
+| Fall physics actually reachable | **Done** — delete The Pad bumper railing on map load |
+| Near-edge obs / edge penalty | **Done** — ThePad has no `is_point_near_edge`; use pad-radius heuristic |
+| Center spawn curriculum | **Done** — FFA rim spawns were too harsh for REINFORCE |
+| End-to-end episodes + `.brain` save/resume | **Verified** |
+| Policy reliably avoids falls | **In progress** — at ~150 eps, overall fall ~20–40%; **rim** starts still ~40–70% fall. REINFORCE is slow; keep training / tune |
 
-**Next agent priority:** get a headless binary, run `./walktrain/run.sh` (or equivalent), fix any boot/import/map-asset errors until episodes log and `output/spaz_walk.brain` appears, then iterate reward/obs if the agent never learns.
+**Next agent priority:** continue training on the same brain; if rim fall rate stays flat past ~500–1000 eps, try lower LR, longer episodes inland, or a stronger center-seeking reward; optional eval mode / jump.
 
-## Layout of this repo
+## How to run
+
+```bash
+cd /path/to/ballistica-walktrain
+export BALLISTICA_ROOT=../ballistica   # sibling engine checkout
+./walktrain/run.sh
+```
+
+Useful env:
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `WALKTRAIN_BRAIN` | `output/spaz_walk.brain` | Checkpoint path (resume = same path) |
+| `WALKTRAIN_SPEED` | `3` | Wall-clock `2**n` via debug speed exponent |
+| `WALKTRAIN_SAVE_EVERY` | `5` | Episodes between saves |
+| `WALKTRAIN_MAX_EP` | `30` | Episode timeout (sim seconds) |
+| `LIBPYTHON_DIR` | auto | Dir containing `libpython3.14.so.1.0` |
+| `PYTHONHOME` | auto with conda | Must match the shared libpython prefix |
+
+Codespaces note: MS CPython is often static-only. Prefab headless needs shared `libpython3.14.so.1.0` — `run.sh` picks conda’s (`/opt/conda/lib`) and sets matching `PYTHONHOME`.
+
+## Sample log (working)
+
+```text
+WalkTrain boot → {..., 'speed_exponent': 5, 'max_episode_seconds': 25.0}
+WalkTrain: launching WalkTrainSession
+WalkTrain: brain=.../output/spaz_walk.brain episodes=0 steps=0 speed=2^5
+ep=1 ret=… survive=25.0s fell=False dist=… drift=… best=25.0s …
+ep=2 ret=… survive=4.5s fell=True dist=… drift=… best=25.0s …
+Saved brain → .../output/spaz_walk.brain (episodes=…)
+```
+
+## Critical pitfalls (already solved — do not rediscover)
+
+1. **`Spaz.on_move(x,y)` is broken** on current engine: sends node message `'move'` → `Invalid node-message type`. Use `on_move_left_right` / `on_move_up_down` like SpazBot.
+2. **The Pad bumper railing** prevents walking off; trainer deletes `map.railing` after construct so falls are learnable.
+3. **`Map.is_point_near_edge` is a no-op** on ThePad (base returns False). Trainer uses `_NEAR_EDGE_RADIUS` around `_PAD_CENTER`.
+4. **FFA spawn points are on the rim** — random policy dies instantly. Trainer spawns near center with expanding jitter.
+5. **stdlib `logging` often invisible** on headless stdout — use `print(..., flush=True)` for episode lines.
+6. **`bs.new_host_session` wants a class**, not an instance — settings via `SESSION_SETTINGS` before launch.
+
+## Layout
 
 ```
 ballistica-walktrain/
-  README.md                 # User-facing quick start
-  docs/HANDOFF.md           # This file — agent continuation
-  docs/ARCHITECTURE.md      # Design, APIs, pitfalls
-  docs/NEXT_STEPS.md        # Ordered TODO for the next agent
+  README.md
+  docs/HANDOFF.md
+  docs/ARCHITECTURE.md
+  docs/NEXT_STEPS.md
   walktrain/
-    __init__.py
-    brain.py                # Policy + value net, save/load
-    activity.py             # WalkTrainSession / WalkTrainActivity
-    boot.py                 # --exec entry
-    run.sh                  # Locate/build binary and launch
-  output/                   # Default checkpoint dir (gitignored *.brain)
+    brain.py activity.py boot.py run.sh
+  output/                   # *.brain checkpoints (gitignored)
 ```
 
-## How it is supposed to run
+## Engine facts
 
-WalkTrain is **not** a reimplementation of physics. It is a Python package that loads **inside** `ballisticakit_headless` and drives a real `Spaz` via:
-
-- `bascenev1lib.actor.spaz.Spaz`
-- `bascenev1lib.maps.ThePad`
-- `bs.Timer` at `tick_interval` (default 0.05 s sim time)
-- `bs.set_debug_speed_exponent(n)` for wall-clock speedup (`2**n`)
-
-Expected launch (from a machine that has this repo **and** a Ballistica checkout/binary):
-
-```bash
-# Option A: helper script (expects to live inside or beside a ballistica tree — see NEXT_STEPS)
-./walktrain/run.sh
-
-# Option B: manual
-export PYTHONPATH=/path/to/ballistica-walktrain:$PYTHONPATH
-export WALKTRAIN_BRAIN=/path/to/ballistica-walktrain/output/spaz_walk.brain
-/path/to/staged/dist/ballisticakit_headless \
-  --exec 'import walktrain.boot; walktrain.boot.main()'
-```
-
-Resume training = same `WALKTRAIN_BRAIN` path; `Brain.load_or_create` restores weights, Adam state, episode counters, RNG.
-
-## Engine facts (do not rediscover from scratch)
-
-- Sim step: **8 ms** (`kGameStepMilliseconds`) — same in headless.
-- Fall detection: `OutOfBoundsMessage` → `DieMessage(FALL)`; map bounds + optional death materials.
-- Spaz controls: `on_move(x,y)`, `on_run(v)`, jump press/release.
-- `bs.new_host_session(SessionClass)` needs a **class**, not a factory — settings go through `walktrain.activity.SESSION_SETTINGS` set in `boot.py` before launch.
-- Headless build/fetch in Ballistica tree: `make prefab-server-debug-build` (needs `uv`, `clang-format`, network). Binary name: `ballisticakit_headless`.
-- Env bootstrap for Ballistica make: install `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`), `clang-format` via apt.
-- No existing neural bot in upstream Ballistica — stock AI is rule-based `SpazBot`.
-
-Upstream engine clone used during development:
-
-```text
-https://github.com/efroemling/ballistica
-```
-
-Shallow clone is fine: `git clone --depth 1 https://github.com/efroemling/ballistica.git`
-
-## Security / secrets
-
-- **Never** commit GitHub PATs, tokens, or `.brain` files with secrets.
-- A PAT was pasted in chat for the initial push; owner should **revoke/rotate** it after use.
-- This repo must not contain Ballistica proprietary asset redistributions beyond what upstream tooling downloads locally.
+- Sim step: **8 ms** — same in headless.
+- Fall: `OutOfBoundsMessage` → `DieMessage(FALL)`; also Y-drop backup in trainer.
+- Upstream: `https://github.com/efroemling/ballistica`
+- Prefab: `make prefab-server-debug-build` (needs `uv`, `clang-format`).
 
 ## Success criteria
 
-1. Headless process runs indefinitely, logging lines like `ep=N ret=… survive=… fell=…`.
-2. `output/spaz_walk.brain` updates on disk periodically.
-3. Killing and relaunching continues `episodes` from the saved value.
-4. Over time, fall rate decreases / survival time increases on The Pad.
+1. Headless process logs `ep=N ret=… survive=… fell=…` indefinitely.
+2. `output/spaz_walk.brain` updates periodically.
+3. Kill + relaunch continues `episodes` from checkpoint.
+4. Over time, fall rate decreases / survival increases on The Pad (railing removed).

@@ -31,6 +31,49 @@ export WALKTRAIN_SPEED="${WALKTRAIN_SPEED:-3}"
 export WALKTRAIN_SAVE_EVERY="${WALKTRAIN_SAVE_EVERY:-5}"
 mkdir -p "$(dirname "$WALKTRAIN_BRAIN")"
 
+# Prefab headless dynamically links libpython3.14.so.1.0. Codespaces/MS
+# CPython is often static-only; conda (and some uv builds) ship the .so.
+# LD_LIBRARY_PATH alone is not enough: PYTHONHOME must match that lib's
+# prefix or the interpreter segfaults mixing stdlibs.
+_ensure_libpython() {
+  if ldconfig -p 2>/dev/null | grep -q 'libpython3\.14\.so\.1\.0'; then
+    return 0
+  fi
+  local cand prefix
+  for cand in \
+    "${LIBPYTHON_DIR:-}" \
+    /opt/conda/lib \
+    "${CONDA_PREFIX:-}/lib" \
+    /usr/local/python/3.14.*/lib \
+    "${HOME}/.local/share/uv/python"/*/lib; do
+    [[ -z "$cand" || "$cand" == "/lib" ]] && continue
+    if [[ -f "$cand/libpython3.14.so.1.0" || -f "$cand/libpython3.14.so" ]]; then
+      export LD_LIBRARY_PATH="${cand}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      prefix="$(cd "$cand/.." && pwd)"
+      # Only set PYTHONHOME when this tree looks like a real prefix.
+      if [[ -d "$prefix/lib/python3.14" || -d "$prefix/bin" ]]; then
+        export PYTHONHOME="${PYTHONHOME:-$prefix}"
+      fi
+      echo "Using libpython from: $cand (PYTHONHOME=${PYTHONHOME:-unset})"
+      return 0
+    fi
+  done
+  cand="$(find /opt/conda /usr/local /home -name 'libpython3.14.so.1.0' 2>/dev/null | head -1 || true)"
+  if [[ -n "$cand" ]]; then
+    export LD_LIBRARY_PATH="$(dirname "$cand")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    prefix="$(cd "$(dirname "$cand")/.." && pwd)"
+    if [[ -d "$prefix/lib/python3.14" ]]; then
+      export PYTHONHOME="${PYTHONHOME:-$prefix}"
+    fi
+    echo "Using libpython from: $(dirname "$cand") (PYTHONHOME=${PYTHONHOME:-unset})"
+    return 0
+  fi
+  echo "WARNING: libpython3.14.so.1.0 not found; binary may fail to start." >&2
+  echo "Set LIBPYTHON_DIR (and matching PYTHONHOME) to a shared CPython 3.14." >&2
+}
+
+_ensure_libpython
+
 BIN=""
 while IFS= read -r candidate; do
   if [[ -x "$candidate" ]]; then

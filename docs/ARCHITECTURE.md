@@ -10,14 +10,21 @@ ballisticakit_headless  (--exec walktrain.boot.main)
         │
         ▼
   WalkTrainActivity
-        ├─ ThePad map (real collision meshes from engine assets)
+        ├─ ThePad map (real collision meshes; bumper railing deleted)
         ├─ Spaz trainee (real node + ODE bodies)
-        ├─ bs.Timer(tick) → observe → Brain.act → on_move/on_run
+        ├─ bs.Timer(tick) → observe → Brain.act → move L/R + U/D + run
         ├─ episode end (fall or timeout) → Brain.learn_episode → maybe save
         └─ BaseTimer(30s wall) → periodic checkpoint
 ```
 
 Physics identity: **engine ODE**, not approximated in Python. WalkTrain only supplies policy + rewards + I/O.
+
+### The Pad specifics
+
+- Stock map installs a **bumper railing** that bounce-walks characters back onto the floor. WalkTrain deletes `map.railing` so walking off edges yields real `OutOfBoundsMessage` / `DieMessage(FALL)`.
+- Base `Map.is_point_near_edge` returns False for ThePad; obs uses horizontal distance from `_PAD_CENTER` vs `_NEAR_EDGE_RADIUS`.
+- Prefer center + expanding jitter spawns over FFA rim points (rim starts make early REINFORCE all-fall).
+- Controls: `on_move_left_right` / `on_move_up_down` — **not** `Spaz.on_move()` (invalid node message on current engine).
 
 ## Brain (`walktrain/brain.py`)
 
@@ -35,14 +42,14 @@ Physics identity: **engine ODE**, not approximated in Python. WalkTrain only sup
 | 0–2 | position relative to pad center, scaled |
 | 3–5 | velocity, scaled |
 | 6 | height above spawn y |
-| 7 | near_edge (0/1) via `map.is_point_near_edge(..., running=True)` |
+| 7 | near_edge (0/1) via pad-radius heuristic (`_NEAR_EDGE_RADIUS`) |
 | 8 | horizontal dist from center |
 | 9 | horizontal speed |
 | 10–11 | sin/cos episode time |
 
 ### Actions (18)
 
-8 compass dirs + idle, each × run bit → `on_move` + `on_run`.
+8 compass dirs + idle, each × run bit → `on_move_left_right` / `on_move_up_down` + `on_run`.
 
 ### Rewards (defaults in `HyperParams`)
 
@@ -51,6 +58,10 @@ Physics identity: **engine ODE**, not approximated in Python. WalkTrain only sup
 - `-edge_penalty` when near edge
 - `-fall_penalty` on last step if fell
 - `+0.5 * fall_penalty` bonus if survived full episode window
+
+### Spawning
+
+Center of The Pad + polar jitter. Radius grows with `episodes` (curriculum) so early runs are safer and later runs start closer to the rim.
 
 ## Activity (`walktrain/activity.py`)
 

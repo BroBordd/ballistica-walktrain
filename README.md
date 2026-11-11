@@ -6,7 +6,7 @@ Headless trainer: spawn a **Spaz** on **The Pad** and learn to walk without fall
 
 ## Status
 
-Core Python trainer is implemented. **First in-engine training run was not fully verified** before this repo was published — see handoff docs for the remaining smoke-test checklist.
+Headless training against real Ballistica physics is **working**: episodes log, falls occur (The Pad railing removed), and `output/spaz_walk.brain` saves/resumes. Policy quality is still being trained/tuned — see [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 ## Requirements
 
