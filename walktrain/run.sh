@@ -117,6 +117,9 @@ echo "Speed:  2^${WALKTRAIN_SPEED}x wall clock (sim step still 8ms)"
 echo "Ctrl-C stops; brain saves every ${WALKTRAIN_SAVE_EVERY} episodes and ~30s wall."
 
 export PYTHONPATH="${PYTHON_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
-EXEC="import walktrain.boot; walktrain.boot.main()"
+# Plugin install copies a playback-only walktrain/ into ~/.ballisticakit/mods.
+# Ballistica imports that first (no boot.py), which shadows this repo's package.
+export WALKTRAIN_PYTHON_ROOT="$PYTHON_ROOT"
+EXEC='import os,sys; r=os.environ["WALKTRAIN_PYTHON_ROOT"]; sys.path.insert(0,r); [sys.modules.pop(k) for k in list(sys.modules) if k=="walktrain" or k.startswith("walktrain.")]; import walktrain.boot as _wtb; _wtb.main()'
 cd "$RUN_CWD"
 exec "$BIN" --exec "$EXEC"
