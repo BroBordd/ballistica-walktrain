@@ -28,9 +28,11 @@ Repo owner: **BroBordd** on GitHub. Project: this repository.
 | Near-edge obs / edge penalty | **Done** — ThePad has no `is_point_near_edge`; use pad-radius heuristic |
 | Center spawn curriculum | **Done** — FFA rim spawns were too harsh for REINFORCE |
 | End-to-end episodes + `.brain` save/resume | **Verified** |
-| Policy reliably avoids falls | **In progress** — at ~150 eps, overall fall ~20–40%; **rim** starts still ~40–70% fall. REINFORCE is slow; keep training / tune |
+| Policy reliably avoids falls | **In progress** — checkpoint at **228 eps / 64k steps**, `best_survival=20s`. Last-50 fall ~32%, last-20 ~40%; many full 20s timeouts when inland. Trainer resumed from this brain. |
 
-**Next agent priority:** continue training on the same brain; if rim fall rate stays flat past ~500–1000 eps, try lower LR, longer episodes inland, or a stronger center-seeking reward; optional eval mode / jump.
+**Initial prompt scope:** infrastructure is complete. Remaining work is **training quality** (and optional polish in `NEXT_STEPS.md`), not missing plumbing.
+
+**Next agent priority:** keep training on `output/spaz_walk.brain`; if fall rate stays flat past ~500–1000 eps, try lower LR, longer inland episodes, or stronger center-seeking reward; optional eval mode / jump. Stale duplicate tree at `ballistica/walktrain/` differs from canonical `ballistica-walktrain/` — sync or delete when convenient.
 
 ## How to run
 
